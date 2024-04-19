@@ -10,6 +10,7 @@ from daft.daft import (
     CsvParseOptions,
     CsvReadOptions,
     IOConfig,
+    JoinDirection,
     JoinType,
     JsonConvertOptions,
     JsonParseOptions,
@@ -278,6 +279,77 @@ class MicroPartition:
         return MicroPartition._from_pymicropartition(
             self._micropartition.sort_merge_join(
                 right._micropartition, left_on=left_exprs, right_on=right_exprs, is_sorted=is_sorted
+            )
+        )
+
+    def hash_asof_join(
+        self,
+        right: MicroPartition,
+        left_on: ExpressionsProjection,
+        right_on: ExpressionsProjection,
+        left_by: ExpressionsProjection,
+        right_by: ExpressionsProjection,
+        direction: JoinDirection,
+        allow_exact_matches: bool,
+    ) -> MicroPartition:
+        if direction != JoinDirection.Backward:
+            raise NotImplementedError("TODO: [RUST] Implement Other AsOf directions")
+        if len(left_on) != len(right_on):
+            raise ValueError(
+                f"Mismatch of number of join keys, left_on: {len(left_on)}, right_on: {len(right_on)}\nleft_on {left_on}\nright_on {right_on}"
+            )
+        if len(left_by) != len(right_by):
+            raise ValueError(
+                f"Mismatch of number of grouping keys, left_by: {len(left_by)}, right_by: {len(right_by)}\nleft_by {left_by}\nright_by {right_by}"
+            )
+
+        if not isinstance(right, MicroPartition):
+            raise TypeError(f"Expected a MicroPartition for `right` in join but got {type(right)}")
+
+        left_on_exprs = [e._expr for e in left_on]
+        right_on_exprs = [e._expr for e in right_on]
+
+        left_by_exprs = [e._expr for e in left_by]
+        right_by_exprs = [e._expr for e in right_by]
+
+        return MicroPartition._from_pymicropartition(
+            self._micropartition.hash_asof_join(
+                right._micropartition,
+                left_on=left_on_exprs,
+                right_on=right_on_exprs,
+                left_by=left_by_exprs,
+                right_by=right_by_exprs,
+                allow_exact_matches=allow_exact_matches,
+            )
+        )
+
+    def range_asof_join(
+        self,
+        right: MicroPartition,
+        left_on: ExpressionsProjection,
+        right_on: ExpressionsProjection,
+        direction: JoinDirection,
+        allow_exact_matches: bool,
+    ) -> MicroPartition:
+        if direction != JoinDirection.Backward:
+            raise NotImplementedError("TODO: [RUST] Implement Other AsOf directions")
+        if len(left_on) != len(right_on):
+            raise ValueError(
+                f"Mismatch of number of join keys, left_on: {len(left_on)}, right_on: {len(right_on)}\nleft_on {left_on}\nright_on {right_on}"
+            )
+
+        if not isinstance(right, MicroPartition):
+            raise TypeError(f"Expected a MicroPartition for `right` in join but got {type(right)}")
+
+        left_on_exprs = [e._expr for e in left_on]
+        right_on_exprs = [e._expr for e in right_on]
+
+        return MicroPartition._from_pymicropartition(
+            self._micropartition.range_asof_join(
+                right._micropartition,
+                left_on=left_on_exprs,
+                right_on=right_on_exprs,
+                allow_exact_matches=allow_exact_matches,
             )
         )
 

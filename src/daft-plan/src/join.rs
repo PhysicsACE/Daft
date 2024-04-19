@@ -137,3 +137,65 @@ impl Display for JoinStrategy {
         write!(f, "{:?}", self)
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[cfg_attr(feature = "python", pyclass(module = "daft.daft"))]
+pub enum JoinDirection {
+    Backward,
+    Forward,
+    Nearest,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl JoinDirection {
+    /// Create a JoinDirection from its string representation.
+    ///
+    /// Args:
+    ///     join_strategy: String representation of the join strategy, e.g. "backward", "forward", or "nearest".
+    #[staticmethod]
+    pub fn from_dir_type_str(join_direction: &str) -> PyResult<Self> {
+        Self::from_str(join_direction).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    pub fn __str__(&self) -> PyResult<String> {
+        Ok(self.to_string())
+    }
+}
+
+impl_bincode_py_state_serialization!(JoinDirection);
+
+impl JoinDirection {
+    pub fn iterator() -> std::slice::Iter<'static, JoinDirection> {
+        use JoinDirection::*;
+
+        static JOIN_DIRECTIONS: [JoinDirection; 3] = [Backward, Forward, Nearest];
+        JOIN_DIRECTIONS.iter()
+    }
+}
+
+impl FromStr for JoinDirection {
+    type Err = DaftError;
+
+    fn from_str(join_direction: &str) -> DaftResult<Self> {
+        use JoinDirection::*;
+
+        match join_direction {
+            "backward" => Ok(Backward),
+            "forward" => Ok(Forward),
+            "nearest" => Ok(Nearest),
+            _ => Err(DaftError::TypeError(format!(
+                "Join direction {} is not supported; only the following strategies are supported: {:?}",
+                join_direction,
+                JoinDirection::iterator().as_slice()
+            ))),
+        }
+    }
+}
+
+impl Display for JoinDirection {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        // Leverage Debug trait implementation, which will already return the enum variant as a string.
+        write!(f, "{:?}", self)
+    }
+}

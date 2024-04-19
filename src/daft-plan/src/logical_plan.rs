@@ -22,6 +22,7 @@ pub enum LogicalPlan {
     Aggregate(Aggregate),
     Concat(Concat),
     Join(Join),
+    MergeAsOf(MergeAsOf),
     Sink(Sink),
     Sample(Sample),
     MonotonicallyIncreasingId(MonotonicallyIncreasingId),
@@ -45,6 +46,7 @@ impl LogicalPlan {
             Self::Aggregate(aggregate) => aggregate.schema(),
             Self::Concat(Concat { input, .. }) => input.schema(),
             Self::Join(Join { output_schema, .. }) => output_schema.clone(),
+            Self::MergeAsOf(MergeAsOf { output_schema, .. }) => output_schema.clone(),
             Self::Sink(Sink { schema, .. }) => schema.clone(),
             Self::Sample(Sample { input, .. }) => input.schema(),
             Self::MonotonicallyIncreasingId(MonotonicallyIncreasingId { schema, .. }) => {
@@ -125,6 +127,21 @@ impl LogicalPlan {
                     .collect();
                 vec![left, right]
             }
+            Self::MergeAsOf(merge_as_of) => {
+                let left = merge_as_of
+                    .left_on
+                    .iter()
+                    .chain(merge_as_of.left_by.iter())
+                    .flat_map(get_required_columns)
+                    .collect();
+                let right = merge_as_of
+                    .right_on
+                    .iter()
+                    .chain(merge_as_of.right_by.iter())
+                    .flat_map(get_required_columns)
+                    .collect();
+                vec![left, right]
+            }
             Self::Source(_) => todo!(),
             Self::Sink(_) => todo!(),
         }
@@ -143,6 +160,7 @@ impl LogicalPlan {
             Self::Aggregate(Aggregate { input, .. }) => vec![input],
             Self::Concat(Concat { input, other }) => vec![input, other],
             Self::Join(Join { left, right, .. }) => vec![left, right],
+            Self::MergeAsOf(MergeAsOf { left, right, .. }) => vec![left, right],
             Self::Sink(Sink { input, .. }) => vec![input],
             Self::Sample(Sample { input, .. }) => vec![input],
             Self::MonotonicallyIncreasingId(MonotonicallyIncreasingId { input, .. }) => vec![input],
@@ -170,6 +188,7 @@ impl LogicalPlan {
                 Self::Source(_) => panic!("Source nodes don't have children, with_new_children() should never be called for Source ops"),
                 Self::Concat(_) => Self::Concat(Concat::try_new(input1.clone(), input2.clone()).unwrap()),
                 Self::Join(Join { left_on, right_on, join_type, join_strategy, .. }) => Self::Join(Join::try_new(input1.clone(), input2.clone(), left_on.clone(), right_on.clone(), *join_type, *join_strategy).unwrap()),
+                Self::MergeAsOf(MergeAsOf { left_on, right_on, left_by, right_by, join_direction, allow_exact_matches, .. }) => Self::MergeAsOf(MergeAsOf::try_new(input1.clone(), input2.clone(), left_on.clone(), right_on.clone(), left_by.clone(), right_by.clone(), *join_direction, *allow_exact_matches).unwrap()),
                 _ => panic!("Logical op {} has one input, but got two", self),
             },
             _ => panic!("Logical ops should never have more than 2 inputs, but got: {}", children.len())
@@ -204,6 +223,7 @@ impl LogicalPlan {
             Self::Aggregate(..) => "Aggregate",
             Self::Concat(..) => "Concat",
             Self::Join(..) => "Join",
+            Self::MergeAsOf(..) => "MergeAsOf",
             Self::Sink(..) => "Sink",
             Self::Sample(..) => "Sample",
             Self::MonotonicallyIncreasingId(..) => "MonotonicallyIncreasingId",
@@ -224,6 +244,7 @@ impl LogicalPlan {
             Self::Aggregate(aggregate) => aggregate.multiline_display(),
             Self::Concat(_) => vec!["Concat".to_string()],
             Self::Join(join) => join.multiline_display(),
+            Self::MergeAsOf(merge_as_of) => merge_as_of.multiline_display(),
             Self::Sink(sink) => sink.multiline_display(),
             Self::Sample(sample) => {
                 vec![format!("Sample: {fraction}", fraction = sample.fraction)]
@@ -288,6 +309,7 @@ impl_from_data_struct_for_logical_plan!(Distinct);
 impl_from_data_struct_for_logical_plan!(Aggregate);
 impl_from_data_struct_for_logical_plan!(Concat);
 impl_from_data_struct_for_logical_plan!(Join);
+impl_from_data_struct_for_logical_plan!(MergeAsOf);
 impl_from_data_struct_for_logical_plan!(Sink);
 impl_from_data_struct_for_logical_plan!(Sample);
 impl_from_data_struct_for_logical_plan!(MonotonicallyIncreasingId);

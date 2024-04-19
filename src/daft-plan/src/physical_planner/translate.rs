@@ -16,9 +16,9 @@ use daft_scan::ScanExternalInfo;
 use crate::logical_ops::{
     Aggregate as LogicalAggregate, Distinct as LogicalDistinct, Explode as LogicalExplode,
     Filter as LogicalFilter, Join as LogicalJoin, Limit as LogicalLimit,
-    MonotonicallyIncreasingId as LogicalMonotonicallyIncreasingId, Project as LogicalProject,
-    Repartition as LogicalRepartition, Sample as LogicalSample, Sink as LogicalSink,
-    Sort as LogicalSort, Source,
+    MergeAsOf as LogicalMergeAsOf, MonotonicallyIncreasingId as LogicalMonotonicallyIncreasingId,
+    Project as LogicalProject, Repartition as LogicalRepartition, Sample as LogicalSample,
+    Sink as LogicalSink, Sort as LogicalSort, Source,
 };
 use crate::logical_plan::LogicalPlan;
 use crate::partitioning::{
@@ -731,6 +731,87 @@ pub(super) fn translate_single_logical_node(
             Ok(PhysicalPlan::MonotonicallyIncreasingId(
                 MonotonicallyIncreasingId::new(input_physical.into(), column_name),
             ))
+        }
+        LogicalPlan::MergeAsOf(LogicalMergeAsOf {
+            left_on,
+            right_on,
+            left_by,
+            right_by,
+            join_direction,
+            allow_exact_matches,
+            ..
+        }) => {
+            let mut right_physical = physical_children.pop().expect("requires 1 inputs");
+            let mut left_physical = physical_children.pop().expect("requires 2 inputs");
+
+            let left_clustering_spec = left_physical.clustering_spec();
+            let right_clustering_spec = right_physical.clustering_spec();
+            let num_partitions = max(
+                left_clustering_spec.num_partitions(),
+                right_clustering_spec.num_partitions(),
+            );
+
+            if !left_by.is_empty() {
+                let new_left_hash_clustering_spec = Arc::new(ClusteringSpec::Hash(
+                    HashClusteringConfig::new(num_partitions, left_by.clone()),
+                ));
+                let new_right_hash_clustering_spec = Arc::new(ClusteringSpec::Hash(
+                    HashClusteringConfig::new(num_partitions, right_by.clone()),
+                ));
+
+                let is_left_hash_partitioned =
+                    left_clustering_spec == new_left_hash_clustering_spec;
+                let is_right_hash_partitioned =
+                    right_clustering_spec == new_right_hash_clustering_spec;
+
+                if (num_partitions > 1 || left_clustering_spec.num_partitions() != num_partitions)
+                    && !is_left_hash_partitioned
+                {
+                    let split_op = PhysicalPlan::FanoutByHash(FanoutByHash::new(
+                        left_physical.into(),
+                        num_partitions,
+                        left_by.clone(),
+                    ));
+                    left_physical = PhysicalPlan::ReduceMerge(ReduceMerge::new(split_op.into()));
+                }
+
+                if (num_partitions > 1 || right_clustering_spec.num_partitions() != num_partitions)
+                    && !is_right_hash_partitioned
+                {
+                    let split_op = PhysicalPlan::FanoutByHash(FanoutByHash::new(
+                        right_physical.into(),
+                        num_partitions,
+                        right_by.clone(),
+                    ));
+                    right_physical = PhysicalPlan::ReduceMerge(ReduceMerge::new(split_op.into()));
+                }
+
+                return Ok(PhysicalPlan::HashAsOfJoin(HashAsOfJoin::new(
+                    left_physical.into(),
+                    right_physical.into(),
+                    left_on.clone(),
+                    right_on.clone(),
+                    left_by.clone(),
+                    right_by.clone(),
+                    *join_direction,
+                    *allow_exact_matches,
+                )));
+            }
+
+            // TODO: Currently, if the 2 dataframes are already range partitioned, we perform an eliding version of sort-merge
+            // granted that the columns have a pritive type like int. For AsOf joins, we can probably do a similar operation
+            // by eliding the partitions once for complex types can be compared. For now, we default to performing an aligned
+            // boundary join, even if the dataframes are already range partitioned by the grouping columns.
+
+            Ok(PhysicalPlan::RangeAsOfJoin(RangeAsOfJoin::new(
+                left_physical.into(),
+                right_physical.into(),
+                left_on.clone(),
+                right_on.clone(),
+                *join_direction,
+                *allow_exact_matches,
+                num_partitions,
+            )))
         }
     }
 }

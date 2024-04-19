@@ -335,6 +335,107 @@ impl PushDownProjection {
                     .or(Transformed::Yes(new_plan));
                 Ok(new_plan)
             }
+            LogicalPlan::MergeAsOf(merge_as_of) => {
+                let [projection_required_columns] = &plan.required_columns()[..] else {
+                    panic!()
+                };
+                let [left_dependencies, right_dependencies] = &upstream_plan.required_columns()[..]
+                else {
+                    panic!()
+                };
+
+                let left_upstream_names = merge_as_of
+                    .left
+                    .schema()
+                    .names()
+                    .iter()
+                    .cloned()
+                    .collect::<IndexSet<_>>();
+                let right_upstream_names = merge_as_of
+                    .right
+                    .schema()
+                    .names()
+                    .iter()
+                    .cloned()
+                    .collect::<IndexSet<_>>();
+
+                let right_combined_dependencies = projection_required_columns
+                    .iter()
+                    .filter_map(|colname| merge_as_of.right_input_mapping.get(colname))
+                    .chain(right_dependencies.iter())
+                    .cloned()
+                    .collect::<IndexSet<_>>();
+
+                let left_combined_dependencies = projection_required_columns
+                    .iter()
+                    .filter_map(|colname| left_upstream_names.get(colname))
+                    .chain(left_dependencies.iter())
+                    // We also have to keep any name conflict columns referenced by the right side.
+                    // E.g. if the user wants "right.c", left must also provide "c", or "right.c" disappears.
+                    // This is mostly an artifact of https://github.com/Eventual-Inc/Daft/issues/1303
+                    .chain(
+                        right_combined_dependencies
+                            .iter()
+                            .filter_map(|rname| left_upstream_names.get(rname)),
+                    )
+                    .cloned()
+                    .collect::<IndexSet<_>>();
+
+                // For each upstream, see if a non-vacuous pushdown is possible.
+                let maybe_new_left_upstream: Option<Arc<LogicalPlan>> = {
+                    if left_combined_dependencies.len() < left_upstream_names.len() {
+                        let pushdown_column_exprs = left_combined_dependencies
+                            .into_iter()
+                            .map(|s| Expr::Column(s.into()))
+                            .collect::<Vec<_>>();
+                        let new_project: LogicalPlan = Project::try_new(
+                            merge_as_of.left.clone(),
+                            pushdown_column_exprs,
+                            Default::default(),
+                        )?
+                        .into();
+                        Some(new_project.into())
+                    } else {
+                        None
+                    }
+                };
+
+                let maybe_new_right_upstream: Option<Arc<LogicalPlan>> = {
+                    if right_combined_dependencies.len() < right_upstream_names.len() {
+                        let pushdown_column_exprs = right_combined_dependencies
+                            .into_iter()
+                            .map(|s| Expr::Column(s.into()))
+                            .collect::<Vec<_>>();
+                        let new_project: LogicalPlan = Project::try_new(
+                            merge_as_of.right.clone(),
+                            pushdown_column_exprs,
+                            Default::default(),
+                        )?
+                        .into();
+                        Some(new_project.into())
+                    } else {
+                        None
+                    }
+                };
+
+                // If either pushdown is possible, create a new Join node.
+                if maybe_new_left_upstream.is_some() || maybe_new_right_upstream.is_some() {
+                    let new_left_upstream =
+                        maybe_new_left_upstream.unwrap_or(merge_as_of.left.clone());
+                    let new_right_upstream =
+                        maybe_new_right_upstream.unwrap_or(merge_as_of.right.clone());
+                    let new_join =
+                        upstream_plan.with_new_children(&[new_left_upstream, new_right_upstream]);
+                    let new_plan = Arc::new(plan.with_new_children(&[new_join.into()]));
+                    // Retry optimization now that the upstream node is different.
+                    let new_plan = self
+                        .try_optimize(new_plan.clone())?
+                        .or(Transformed::Yes(new_plan));
+                    Ok(new_plan)
+                } else {
+                    Ok(Transformed::No(plan))
+                }
+            }
             LogicalPlan::Join(join) => {
                 // Get required columns from projection and both upstreams.
                 let [projection_required_columns] = &plan.required_columns()[..] else {

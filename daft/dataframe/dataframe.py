@@ -27,7 +27,14 @@ from typing import (
 from daft.api_annotations import DataframePublicAPI
 from daft.context import get_context
 from daft.convert import InputListType
-from daft.daft import FileFormat, IOConfig, JoinStrategy, JoinType, ResourceRequest
+from daft.daft import (
+    FileFormat,
+    IOConfig,
+    JoinDirection,
+    JoinStrategy,
+    JoinType,
+    ResourceRequest,
+)
 from daft.dataframe.preview import DataFramePreview
 from daft.datatype import DataType
 from daft.errors import ExpressionTypeError
@@ -909,6 +916,64 @@ class DataFrame:
         right_exprs = self.__column_input_to_expression(tuple(right_on) if isinstance(right_on, list) else (right_on,))
         builder = self._builder.join(
             other._builder, left_on=left_exprs, right_on=right_exprs, how=join_type, strategy=join_strategy
+        )
+        return DataFrame(builder)
+
+    DataframePublicAPI
+
+    def merge_asof(
+        self,
+        other: "DataFrame",
+        on: Optional[Union[List[ColumnInputType], ColumnInputType]] = None,
+        left_on: Optional[Union[List[ColumnInputType], ColumnInputType]] = None,
+        right_on: Optional[Union[List[ColumnInputType], ColumnInputType]] = None,
+        by: ColumnInputType = "",
+        left_by: ColumnInputType = "",
+        right_by: ColumnInputType = "",
+        direction: str = "backward",
+        allow_exact_matches: bool = False,
+    ) -> "DataFrame":
+        """Column-wise point in time join of the current DataFrame with an ``other`` DataFrame, similar to ``merge_asof`` in pandas
+        Returns:
+            DataFrame: Joined DataFrame.
+        """
+        if on is None:
+            if left_on is None or right_on is None:
+                raise ValueError("If `on` is None then both `left_on` and `right_on` must not be None")
+        else:
+            if left_on is not None or right_on is not None:
+                raise ValueError("If `on` is not None then both `left_on` and `right_on` must be None")
+            left_on = on
+            right_on = on
+
+        if by == "":
+            if left_by == "" or right_by == "":
+                raise ValueError("If `by` is None then both `left_by` and `right_by` must not be None")
+        else:
+            if left_by != "" or right_by != "":
+                raise ValueError("If `by` is not None then both `left_by` and `right_by` must be None")
+            left_by = by
+            right_by = by
+
+        join_direction = JoinDirection.from_dir_type_str(direction)
+        if join_direction != JoinDirection.Backward:
+            raise ValueError(f"Only backward joins are currently supported, but got: {direction}")
+
+        left_on_exprs = self.__column_input_to_expression(tuple(left_on) if isinstance(left_on, list) else (left_on,))
+        right_on_exprs = self.__column_input_to_expression(
+            tuple(right_on) if isinstance(right_on, list) else (right_on,)
+        )
+        left_by_exprs = self.__column_input_to_expression((left_by,))
+        right_by_exprs = self.__column_input_to_expression((right_by,))
+
+        builder = self._builder.merge_asof(
+            other._builder,
+            left_on=left_on_exprs,
+            right_on=right_on_exprs,
+            left_by=left_by_exprs,
+            right_by=right_by_exprs,
+            direction=join_direction,
+            allow_exact_matches=allow_exact_matches,
         )
         return DataFrame(builder)
 

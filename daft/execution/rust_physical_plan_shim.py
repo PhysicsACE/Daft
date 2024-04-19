@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from daft.daft import (
     FileFormat,
     IOConfig,
+    JoinDirection,
     JoinType,
     PyExpr,
     PySchema,
@@ -282,4 +283,52 @@ def write_iceberg(
         iceberg_properties=iceberg_properties,
         spec_id=spec_id,
         io_config=io_config,
+    )
+
+
+def hash_asof_join(
+    input: physical_plan.InProgressPhysicalPlan[PartitionT],
+    right: physical_plan.InProgressPhysicalPlan[PartitionT],
+    left_on: list[PyExpr],
+    right_on: list[PyExpr],
+    left_by: list[PyExpr],
+    right_by: list[PyExpr],
+    join_direction: JoinDirection,
+    allow_exact_matches: bool,
+) -> physical_plan.InProgressPhysicalPlan[PartitionT]:
+    left_on_expr_proj = ExpressionsProjection([Expression._from_pyexpr(expr) for expr in left_on])
+    right_on_expr_proj = ExpressionsProjection([Expression._from_pyexpr(expr) for expr in right_on])
+    left_by_expr_proj = ExpressionsProjection([Expression._from_pyexpr(expr) for expr in left_by])
+    right_by_expr_proj = ExpressionsProjection([Expression._from_pyexpr(expr) for expr in right_by])
+    return physical_plan.hash_asof_join(
+        left_plan=input,
+        right_plan=right,
+        left_on=left_on_expr_proj,
+        right_on=right_on_expr_proj,
+        left_by=left_by_expr_proj,
+        right_by=right_by_expr_proj,
+        direction=join_direction,
+        allow_exact_matches=allow_exact_matches,
+    )
+
+
+def range_asof_join(
+    input: physical_plan.InProgressPhysicalPlan[PartitionT],
+    right: physical_plan.InProgressPhysicalPlan[PartitionT],
+    left_on: list[PyExpr],
+    right_on: list[PyExpr],
+    join_direction: JoinDirection,
+    allow_exact_matches: bool,
+    num_partitions: int,
+) -> physical_plan.InProgressPhysicalPlan[PartitionT]:
+    left_on_expr_proj = ExpressionsProjection([Expression._from_pyexpr(expr) for expr in left_on])
+    right_on_expr_proj = ExpressionsProjection([Expression._from_pyexpr(expr) for expr in right_on])
+    return physical_plan.range_asof_join(
+        left_plan=input,
+        right_plan=right,
+        left_on=left_on_expr_proj,
+        right_on=right_on_expr_proj,
+        direction=join_direction,
+        allow_exact_matches=allow_exact_matches,
+        num_partitions=num_partitions,
     )

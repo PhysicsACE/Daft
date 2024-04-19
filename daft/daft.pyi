@@ -121,6 +121,22 @@ class JoinStrategy(Enum):
         """
         ...
 
+class JoinDirection(Enum):
+    Backward: int
+    Forward: int
+    Nearest: int
+
+    @staticmethod
+    def from_dir_type_str(join_direction: str) -> JoinDirection:
+        """
+        Create a JoinDirection from its string representation.
+        Args:
+            join_direction: String representation of the join direction. This is the same as the enum
+                attribute name (but snake-case), e.g. ``JoinType.from_join_direction_str("backward")`` would
+                return ``JoinDirection.Backward``.
+        """
+        ...
+
 class CountMode(Enum):
     """
     Supported count modes for Daft's count aggregation.
@@ -1179,6 +1195,22 @@ class PyMicroPartition:
     def sort_merge_join(
         self, right: PyMicroPartition, left_on: list[PyExpr], right_on: list[PyExpr], is_sorted: bool
     ) -> PyMicroPartition: ...
+    def hash_asof_join(
+        self,
+        right: PyMicroPartition,
+        left_on: list[PyExpr],
+        right_on: list[PyExpr],
+        left_by: list[PyExpr],
+        right_by: list[PyExpr],
+        allow_exact_matches: bool,
+    ) -> PyMicroPartition: ...
+    def range_asof_join(
+        self,
+        right: PyMicroPartition,
+        left_on: list[PyExpr],
+        right_on: list[PyExpr],
+        allow_exact_matches: bool,
+    ) -> PyMicroPartition: ...
     def explode(self, to_explode: list[PyExpr]) -> PyMicroPartition: ...
     def head(self, num: int) -> PyMicroPartition: ...
     def sample_by_fraction(self, fraction: float, with_replacement: bool, seed: int | None) -> PyMicroPartition: ...
@@ -1288,6 +1320,16 @@ class LogicalPlanBuilder:
         right_on: list[PyExpr],
         join_type: JoinType,
         strategy: JoinStrategy | None = None,
+    ) -> LogicalPlanBuilder: ...
+    def merge_asof(
+        self,
+        right: LogicalPlanBuilder,
+        left_on: list[PyExpr],
+        right_on: list[PyExpr],
+        left_by: list[PyExpr],
+        right_by: list[PyExpr],
+        direction: JoinDirection,
+        allow_exact_matches: bool,
     ) -> LogicalPlanBuilder: ...
     def concat(self, other: LogicalPlanBuilder) -> LogicalPlanBuilder: ...
     def add_monotonically_increasing_id(self, column_name: str | None) -> LogicalPlanBuilder: ...

@@ -22,6 +22,7 @@ use daft_dsl::{col, null_lit, AggExpr, Expr};
 pub mod ffi;
 mod ops;
 
+pub use ops::infer_asof_schema;
 pub use ops::infer_join_schema;
 #[cfg(feature = "python")]
 pub mod python;

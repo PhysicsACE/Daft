@@ -10,7 +10,7 @@ use crate::{
     physical_planner::plan,
     sink_info::{OutputFileInfo, SinkInfo},
     source_info::SourceInfo,
-    JoinStrategy, JoinType, PhysicalPlanScheduler, ResourceRequest,
+    JoinDirection, JoinStrategy, JoinType, PhysicalPlanScheduler, ResourceRequest,
 };
 use common_error::{DaftError, DaftResult};
 use common_io_config::IOConfig;
@@ -330,6 +330,31 @@ impl LogicalPlanBuilder {
             right_on,
             join_type,
             join_strategy,
+        )?
+        .into();
+        Ok(logical_plan.into())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_asof(
+        &self,
+        right: &Self,
+        left_on: Vec<Expr>,
+        right_on: Vec<Expr>,
+        left_by: Vec<Expr>,
+        right_by: Vec<Expr>,
+        direction: JoinDirection,
+        allow_exact_matches: bool,
+    ) -> DaftResult<Self> {
+        let logical_plan: LogicalPlan = logical_ops::MergeAsOf::try_new(
+            self.plan.clone(),
+            right.plan.clone(),
+            left_on,
+            right_on,
+            left_by,
+            right_by,
+            direction,
+            allow_exact_matches,
         )?
         .into();
         Ok(logical_plan.into())

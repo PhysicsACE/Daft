@@ -262,6 +262,59 @@ impl PyMicroPartition {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn hash_asof_join(
+        &self,
+        py: Python,
+        right: &Self,
+        left_on: Vec<PyExpr>,
+        right_on: Vec<PyExpr>,
+        left_by: Vec<PyExpr>,
+        right_by: Vec<PyExpr>,
+        allow_exact_matches: bool,
+    ) -> PyResult<Self> {
+        let left_on_exprs: Vec<daft_dsl::Expr> = left_on.into_iter().map(|e| e.into()).collect();
+        let right_on_exprs: Vec<daft_dsl::Expr> = right_on.into_iter().map(|e| e.into()).collect();
+        let left_by_exprs: Vec<daft_dsl::Expr> = left_by.into_iter().map(|e| e.into()).collect();
+        let right_by_exprs: Vec<daft_dsl::Expr> = right_by.into_iter().map(|e| e.into()).collect();
+        py.allow_threads(|| {
+            Ok(self
+                .inner
+                .hash_asof_join(
+                    &right.inner,
+                    left_on_exprs.as_slice(),
+                    right_on_exprs.as_slice(),
+                    left_by_exprs.as_slice(),
+                    right_by_exprs.as_slice(),
+                    allow_exact_matches,
+                )?
+                .into())
+        })
+    }
+
+    pub fn range_asof_join(
+        &self,
+        py: Python,
+        right: &Self,
+        left_on: Vec<PyExpr>,
+        right_on: Vec<PyExpr>,
+        allow_exact_matches: bool,
+    ) -> PyResult<Self> {
+        let left_on_exprs: Vec<daft_dsl::Expr> = left_on.into_iter().map(|e| e.into()).collect();
+        let right_on_exprs: Vec<daft_dsl::Expr> = right_on.into_iter().map(|e| e.into()).collect();
+        py.allow_threads(|| {
+            Ok(self
+                .inner
+                .range_asof_join(
+                    &right.inner,
+                    left_on_exprs.as_slice(),
+                    right_on_exprs.as_slice(),
+                    allow_exact_matches,
+                )?
+                .into())
+        })
+    }
+
     pub fn explode(&self, py: Python, to_explode: Vec<PyExpr>) -> PyResult<Self> {
         let converted_to_explode: Vec<daft_dsl::Expr> =
             to_explode.into_iter().map(|e| e.expr).collect();

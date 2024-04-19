@@ -11,7 +11,7 @@ if sys.version_info < (3, 8):
 else:
     from typing import Protocol
 
-from daft.daft import FileFormat, IOConfig, JoinType, ResourceRequest, ScanTask
+from daft.daft import FileFormat, IOConfig, JoinDirection, JoinType, ResourceRequest, ScanTask
 from daft.expressions import Expression, ExpressionsProjection, col
 from daft.logical.map_partition_ops import MapPartitionOp
 from daft.logical.schema import Schema
@@ -890,5 +890,124 @@ class FanoutSlices(FanoutInstruction):
                     boundaries=input_meta.boundaries,
                 )
             )
+
+        return results
+
+
+@dataclass(frozen=True)
+class HashAsOfJoin(SingleOutputInstruction):
+    left_on: ExpressionsProjection
+    right_on: ExpressionsProjection
+    left_by: ExpressionsProjection
+    right_by: ExpressionsProjection
+    direction: JoinDirection
+    allow_exact_matches: bool
+
+    def run(self, inputs: list[MicroPartition]) -> list[MicroPartition]:
+        return self._hash_asof_join(inputs)
+
+    def _hash_asof_join(self, inputs: list[MicroPartition]) -> list[MicroPartition]:
+        left, right = inputs
+        result = left.hash_asof_join(
+            right,
+            left_on=self.left_on,
+            right_on=self.right_on,
+            left_by=self.left_by,
+            right_by=self.right_by,
+            direction=self.direction,
+            allow_exact_matches=self.allow_exact_matches,
+        )
+        return [result]
+
+    def run_partial_metadata(self, input_metadatas: list[PartialPartitionMetadata]) -> list[PartialPartitionMetadata]:
+        # Can't derive anything.
+        return [
+            PartialPartitionMetadata(
+                num_rows=None,
+                size_bytes=None,
+            )
+        ]
+
+
+@dataclass(frozen=True)
+class RangeAsOfJoin(SingleOutputInstruction):
+    left_on: ExpressionsProjection
+    right_on: ExpressionsProjection
+    direction: JoinDirection
+    allow_exact_matches: bool
+
+    def run(self, inputs: list[MicroPartition]) -> list[MicroPartition]:
+        return self._range_asof_join(inputs)
+
+    def _range_asof_join(self, inputs: list[MicroPartition]) -> list[MicroPartition]:
+        left, right = inputs
+        result = left.range_asof_join(
+            right,
+            left_on=self.left_on,
+            right_on=self.right_on,
+            direction=self.direction,
+            allow_exact_matches=self.allow_exact_matches,
+        )
+        return [result]
+
+    def run_partial_metadata(self, input_metadatas: list[PartialPartitionMetadata]) -> list[PartialPartitionMetadata]:
+        [left_meta, right_meta] = input_metadatas
+        # If the boundaries of the left and right partitions don't intersect, then the merge-join will result in an empty partition.
+        if left_meta.boundaries is None or right_meta.boundaries is None:
+            is_nonempty = True
+        else:
+            is_nonempty = left_meta.boundaries.intersects(right_meta.boundaries)
+        return [
+            PartialPartitionMetadata(
+                num_rows=None if is_nonempty else 0,
+                size_bytes=None,
+                boundaries=left_meta.boundaries,
+            )
+        ]
+
+
+@dataclass(frozen=True)
+class FanoutPadding(FanoutInstruction):
+    left_padding: int
+    right_padding: int
+
+    def run(self, inputs: list[MicroPartition]) -> list[MicroPartition]:
+        return self._fanout_padding(inputs)
+
+    def _fanout_padding(self, inputs: list[MicroPartition]) -> list[MicroPartition]:
+        [input] = inputs
+        schema = input.schema()
+        num_rows = len(input)
+        if num_rows == 0:
+            return [MicroPartition.empty(schema=schema), MicroPartition.empty(schema=schema)]
+
+        left_idx = min(num_rows, self.left_padding)
+        right_idx = max(0, num_rows - self.right_padding)
+        return [input.slice(0, left_idx), input, input.slice(right_idx, num_rows)]
+
+    def run_partial_metadata(self, input_metadatas: list[PartialPartitionMetadata]) -> list[PartialPartitionMetadata]:
+        [input_meta] = input_metadatas
+        results = []
+        results.append(
+            PartialPartitionMetadata(
+                num_rows=self.left_padding,
+                size_bytes=None,
+                boundaries=input_meta.boundaries,
+            )
+        )
+        results.append(
+            PartialPartitionMetadata(
+                num_rows=input_meta.num_rows,
+                size_bytes=None,
+                boundaries=input_meta.boundaries,
+            )
+        )
+        results.append(
+            PartialPartitionMetadata(
+                num_rows=self.right_padding,
+                size_bytes=None,
+                boundaries=input_meta.boundaries,
+            )
+        )
 
         return results

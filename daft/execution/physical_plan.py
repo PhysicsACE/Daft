@@ -22,7 +22,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Generator, Generic, Iterable, Iterator, TypeVar, Union
 
 from daft.context import get_context
-from daft.daft import FileFormat, IOConfig, JoinType, ResourceRequest
+from daft.daft import FileFormat, IOConfig, JoinDirection, JoinType, ResourceRequest
 from daft.execution import execution_step
 from daft.execution.execution_step import (
     Instruction,
@@ -37,6 +37,7 @@ from daft.logical.schema import Schema
 from daft.runners.partitioning import (
     MaterializedResult,
     PartialPartitionMetadata,
+    PartitionMetadata,
     PartitionT,
 )
 from daft.table.micropartition import MicroPartition
@@ -1516,3 +1517,507 @@ def enumerate_open_executions(
 def consume_deque(dq: deque[T]) -> Iterator[T]:
     while len(dq) > 0:
         yield dq.popleft()
+
+
+def hash_asof_join(
+    left_plan: InProgressPhysicalPlan[PartitionT],
+    right_plan: InProgressPhysicalPlan[PartitionT],
+    left_on: ExpressionsProjection,
+    right_on: ExpressionsProjection,
+    left_by: ExpressionsProjection,
+    right_by: ExpressionsProjection,
+    direction: JoinDirection,
+    allow_exact_matches: bool,
+) -> InProgressPhysicalPlan[PartitionT]:
+    # Materialize the steps from the left and right sources to get partitions.
+    # As the materializations complete, emit new steps to join each left and right partition.
+    left_requests: deque[SingleOutputPartitionTask[PartitionT]] = deque()
+    right_requests: deque[SingleOutputPartitionTask[PartitionT]] = deque()
+    stage_id = next(stage_id_counter)
+    yield_left = True
+
+    while True:
+        # Emit new join steps if we have left and right partitions ready.
+        while (
+            len(left_requests) > 0 and len(right_requests) > 0 and left_requests[0].done() and right_requests[0].done()
+        ):
+            next_left = left_requests.popleft()
+            next_right = right_requests.popleft()
+
+            # Calculate memory request for task.
+            left_size_bytes = next_left.partition_metadata().size_bytes
+            right_size_bytes = next_right.partition_metadata().size_bytes
+            if left_size_bytes is None and right_size_bytes is None:
+                size_bytes = None
+            elif left_size_bytes is None and right_size_bytes is not None:
+                # Use 2x the right side as the memory request, assuming that left and right side are ~ the same size.
+                size_bytes = 2 * right_size_bytes
+            elif right_size_bytes is None and left_size_bytes is not None:
+                # Use 2x the left side as the memory request, assuming that left and right side are ~ the same size.
+                size_bytes = 2 * left_size_bytes
+            elif left_size_bytes is not None and right_size_bytes is not None:
+                size_bytes = left_size_bytes + right_size_bytes
+
+            join_step = PartitionTaskBuilder[PartitionT](
+                inputs=[next_left.partition(), next_right.partition()],
+                partial_metadatas=[next_left.partition_metadata(), next_right.partition_metadata()],
+                resource_request=ResourceRequest(memory_bytes=size_bytes),
+            ).add_instruction(
+                instruction=execution_step.HashAsOfJoin(
+                    left_on=left_on,
+                    right_on=right_on,
+                    left_by=left_by,
+                    right_by=right_by,
+                    direction=direction,
+                    allow_exact_matches=allow_exact_matches,
+                )
+            )
+            yield join_step
+
+        # Exhausted all ready inputs; execute a single child step to get more join inputs.
+        # Choose whether to execute from left child or right child (whichever one is more behind)
+        if len(left_requests) < len(right_requests):
+            next_plan, next_requests = left_plan, left_requests
+        elif len(left_requests) > len(right_requests):
+            next_plan, next_requests = right_plan, right_requests
+        elif len(left_requests) == len(right_requests):
+            # Both plans have progressed equally; alternate between the two plans to avoid starving either one
+            next_plan, next_requests = (left_plan, left_requests) if yield_left else (right_plan, right_requests)
+            yield_left = not yield_left
+
+        try:
+            step = next(next_plan)
+            if isinstance(step, PartitionTaskBuilder):
+                step = step.finalize_partition_task_single_output(stage_id=stage_id)
+                next_requests.append(step)
+            yield step
+
+        except StopIteration:
+            # Left and right child plans have completed.
+            # Are we still waiting for materializations to complete? (We will emit more joins from them).
+            if len(left_requests) + len(right_requests) > 0:
+                logger.debug(
+                    "join blocked on completion of sources.\n Left sources: %s\nRight sources: %s",
+                    left_requests,
+                    right_requests,
+                )
+                yield None
+
+            # Otherwise, we are entirely done.
+            else:
+                return
+
+
+def zip_partitions(
+    left_plan: InProgressPhysicalPlan[PartitionT],
+    right_plan: InProgressPhysicalPlan[PartitionT],
+    left_on: ExpressionsProjection,
+    right_on: ExpressionsProjection,
+    direction: JoinDirection,
+    allow_exact_matches: bool,
+) -> InProgressPhysicalPlan[PartitionT]:
+    # Materialize the steps from the left and right sources to get partitions.
+    # As the materializations complete, emit new steps to join each left and right partition.
+    left_requests: deque[SingleOutputPartitionTask[PartitionT]] = deque()
+    right_requests: deque[SingleOutputPartitionTask[PartitionT]] = deque()
+    stage_id = next(stage_id_counter)
+    yield_left = True
+
+    while True:
+        # Emit new join steps if we have left and right partitions ready.
+        while (
+            len(left_requests) > 0 and len(right_requests) > 0 and left_requests[0].done() and right_requests[0].done()
+        ):
+            next_left = left_requests.popleft()
+            next_right = right_requests.popleft()
+
+            # Calculate memory request for merge task.
+            left_size_bytes = next_left.partition_metadata().size_bytes
+            right_size_bytes = next_right.partition_metadata().size_bytes
+            if left_size_bytes is None and right_size_bytes is None:
+                size_bytes = None
+            elif left_size_bytes is None and right_size_bytes is not None:
+                # Use 2x the right side as the memory request, assuming that left and right side are ~ the same size.
+                size_bytes = 2 * right_size_bytes
+            elif right_size_bytes is None and left_size_bytes is not None:
+                # Use 2x the left side as the memory request, assuming that left and right side are ~ the same size.
+                size_bytes = 2 * left_size_bytes
+            elif left_size_bytes is not None and right_size_bytes is not None:
+                size_bytes = left_size_bytes + right_size_bytes
+
+            join_step = PartitionTaskBuilder[PartitionT](
+                inputs=[next_left.partition(), next_right.partition()],
+                partial_metadatas=[next_left.partition_metadata(), next_right.partition_metadata()],
+                resource_request=ResourceRequest(memory_bytes=size_bytes),
+            ).add_instruction(
+                instruction=execution_step.RangeAsOfJoin(
+                    left_on=left_on,
+                    right_on=right_on,
+                    direction=direction,
+                    allow_exact_matches=allow_exact_matches,
+                )
+            )
+            yield join_step
+
+        # Exhausted all ready inputs; execute a single child step to get more join inputs.
+        # Choose whether to execute from left child or right child (whichever one is furthest behind).
+        if len(left_requests) < len(right_requests):
+            next_plan, next_requests = left_plan, left_requests
+        elif len(left_requests) > len(right_requests):
+            next_plan, next_requests = right_plan, right_requests
+        elif len(left_requests) == len(right_requests):
+            # Both plans have progressed equally; alternate between the two plans to avoid starving either one.
+            next_plan, next_requests = (left_plan, left_requests) if yield_left else (right_plan, right_requests)
+            yield_left = not yield_left
+
+        try:
+            step = next(next_plan)
+            if isinstance(step, PartitionTaskBuilder):
+                step = step.finalize_partition_task_single_output(stage_id=stage_id)
+                next_requests.append(step)
+            yield step
+
+        except StopIteration:
+            # Left and right child plans have completed.
+            # Are we still waiting for materializations to complete? (We will emit more joins from them).
+            if len(left_requests) + len(right_requests) > 0:
+                logger.debug(
+                    "join blocked on completion of sources.\n Left sources: %s\nRight sources: %s",
+                    left_requests,
+                    right_requests,
+                )
+                yield None
+
+            # Otherwise, we are entirely done.
+            else:
+                return
+
+
+def range_asof_join(
+    left_plan: InProgressPhysicalPlan[PartitionT],
+    right_plan: InProgressPhysicalPlan[PartitionT],
+    left_on: ExpressionsProjection,
+    right_on: ExpressionsProjection,
+    direction: JoinDirection,
+    allow_exact_matches: bool,
+    num_partitions: int,
+) -> InProgressPhysicalPlan[PartitionT]:
+    descending = [False] * len(left_on)
+    # First, materialize the left and right child plans.
+    left_source_materializations: deque[SingleOutputPartitionTask[PartitionT]] = deque()
+    right_source_materializations: deque[SingleOutputPartitionTask[PartitionT]] = deque()
+    stage_id_children = next(stage_id_counter)
+    for child, source_materializations in [
+        (left_plan, left_source_materializations),
+        (right_plan, right_source_materializations),
+    ]:
+        for step in child:
+            if isinstance(step, PartitionTaskBuilder):
+                step = step.finalize_partition_task_single_output(stage_id=stage_id_children)
+                source_materializations.append(step)
+            yield step
+
+    left_sample_materializations: deque[SingleOutputPartitionTask[PartitionT]] = deque()
+    right_sample_materializations: deque[SingleOutputPartitionTask[PartitionT]] = deque()
+    stage_id_sampling = next(stage_id_counter)
+    sample_size = get_context().daft_execution_config.sample_size_for_sort
+
+    sample_size = get_context().daft_execution_config.sample_size_for_sort
+    for source_materializations, on, sample_materializations in [
+        (left_source_materializations, left_on, left_sample_materializations),
+        (right_source_materializations, right_on, right_sample_materializations),
+    ]:
+        for source in source_materializations:
+            while not source.done():
+                logger.debug("sort blocked on completion of source: %s", source)
+                yield None
+
+            sample = (
+                PartitionTaskBuilder[PartitionT](
+                    inputs=[source.partition()],
+                    partial_metadatas=None,
+                )
+                .add_instruction(
+                    instruction=execution_step.Sample(sort_by=on, size=sample_size),
+                )
+                # Rename sample columns so they align with sort_by_left naming, so we can reduce to combined quantiles below.
+                # NOTE: This instruction will be a no-op for the left side of the sort.
+                .add_instruction(
+                    instruction=execution_step.Project(
+                        projection=ExpressionsProjection(
+                            [
+                                e.alias(left_name)
+                                for e, left_name in zip(on.to_column_expressions(), [e.name() for e in left_on])
+                            ]
+                        ),
+                    )
+                )
+                .finalize_partition_task_single_output(stage_id=stage_id_sampling)
+            )
+
+            sample_materializations.append(sample)
+            yield sample
+
+    # Wait for samples from both child plans to materialize.
+    for sample_materializations in (left_sample_materializations, right_sample_materializations):
+        while any(not _.done() for _ in sample_materializations):
+            logger.debug("sort blocked on completion of all samples: %s", sample_materializations)
+            yield None
+
+    stage_id_reduce = next(stage_id_counter)
+
+    # Reduce the samples from both child plans to get combined sort partitioning boundaries.
+    left_boundaries = (
+        PartitionTaskBuilder[PartitionT](
+            inputs=[
+                sample.partition()
+                for sample in itertools.chain(
+                    consume_deque(left_sample_materializations), consume_deque(right_sample_materializations)
+                )
+            ],
+            partial_metadatas=None,
+        )
+        .add_instruction(
+            execution_step.ReduceToQuantiles(
+                num_quantiles=num_partitions,
+                sort_by=left_on,
+                descending=descending,
+            ),
+        )
+        .finalize_partition_task_single_output(stage_id=stage_id_reduce)
+    )
+    yield left_boundaries
+
+    # Wait for boundaries to materialize.
+    while not left_boundaries.done():
+        logger.debug("sort blocked on completion of boundary partition: %s", left_boundaries)
+        yield None
+
+    # Project boundaries back to the right-side column names.
+    # TODO(Clark): Refactor execution model to be able to fuse this with downstream sorting.
+    right_boundaries = (
+        PartitionTaskBuilder[PartitionT](
+            inputs=[left_boundaries.partition()],
+            partial_metadatas=None,
+        )
+        # Rename quantile columns so their original naming is restored, so we can sort each child with their native expression.
+        .add_instruction(
+            instruction=execution_step.Project(
+                projection=ExpressionsProjection(
+                    [
+                        e.alias(right_name)
+                        for e, right_name in zip(left_on.to_column_expressions(), [e.name() for e in right_on])
+                    ]
+                ),
+            )
+        )
+        .finalize_partition_task_single_output(stage_id=stage_id_reduce)
+    )
+    yield right_boundaries
+
+    # Wait for right-side boundaries to materialize.
+    while not right_boundaries.done():
+        logger.debug("sort blocked on completion of boundary partition: %s", right_boundaries)
+        yield None
+
+    # Sort both children using the combined boundaries.
+    sorted_plans: list[InProgressPhysicalPlan[PartitionT]] = []
+    i = 0
+    for on, source_materializations, boundaries in [
+        (left_on, left_source_materializations, left_boundaries),
+        (right_on, right_source_materializations, right_boundaries),
+    ]:
+        # NOTE: We need to give reduce() an iter(list), since giving it a generator would result in lazy
+        # binding in this loop.
+        range_fanout_plan = [
+            PartitionTaskBuilder[PartitionT](
+                inputs=[boundaries.partition(), source.partition()],
+                partial_metadatas=[boundaries.partition_metadata(), source.partition_metadata()],
+                resource_request=ResourceRequest(
+                    memory_bytes=source.partition_metadata().size_bytes,
+                ),
+            ).add_instruction(
+                instruction=execution_step.FanoutRange[PartitionT](
+                    _num_outputs=num_partitions,
+                    sort_by=on,
+                    descending=descending,
+                ),
+            )
+            for source in consume_deque(source_materializations)
+        ]
+
+        # Execute a sorting reduce on it.
+        per_partition_bounds = _to_per_partition_bounds(boundaries.vpartition(), num_partitions)
+        if i > 0:
+            sorted_plans.append(
+                interweaved_reduce(
+                    fanout_plan=iter(range_fanout_plan),
+                    reduce_instructions=[
+                        execution_step.ReduceMergeAndSort(
+                            sort_by=on,
+                            descending=descending,
+                            bounds=per_part_boundaries,
+                        )
+                        for per_part_boundaries in per_partition_bounds
+                    ],
+                    left=1,
+                    right=1,
+                )
+            )
+            continue
+
+        sorted_plans.append(
+            reduce(
+                fanout_plan=iter(range_fanout_plan),
+                reduce_instructions=[
+                    execution_step.ReduceMergeAndSort(
+                        sort_by=on,
+                        descending=descending,
+                        bounds=per_part_boundaries,
+                    )
+                    for per_part_boundaries in per_partition_bounds
+                ],
+            )
+        )
+        i += 1
+
+    left_sorted_plan, right_sorted_plan = sorted_plans
+    yield from zip_partitions(
+        left_plan=left_sorted_plan,
+        right_plan=right_sorted_plan,
+        left_on=left_on,
+        right_on=right_on,
+        direction=direction,
+        allow_exact_matches=allow_exact_matches,
+    )
+
+
+def interweaved_reduce(
+    fanout_plan: InProgressPhysicalPlan[PartitionT],
+    reduce_instructions: list[Instruction],
+    left: int,
+    right: int,
+) -> InProgressPhysicalPlan[PartitionT]:
+    """InterweaveReduce the result of fanout_plan based on overlapping rows of
+    neighbouring partitions.
+    The child plan fanout_plan must produce a 2d list of partitions,
+    by producing a single list in each step.
+    Then, the reduce instruction is applied to each `i`th slice across the child lists.
+    """
+
+    materializations = list()
+    stage_id = next(stage_id_counter)
+
+    # Dispatch all fanouts
+    for step in fanout_plan:
+        if isinstance(step, PartitionTaskBuilder):
+            step = step.finalize_partition_task_multi_output(stage_id=stage_id)
+            materializations.append(step)
+        yield step
+
+    # All fanouts dispatched. Wait for all of them to materialize
+    # (since we need all of them to emit even a single reduce).
+    while any(not _.done() for _ in materializations):
+        logger.debug("reduce blocked on completion of all sources in: %s", materializations)
+        yield None
+
+    inputs_to_reduce = [deque(_.partitions()) for _ in materializations]
+    metadatas = [deque(_.partition_metadatas()) for _ in materializations]
+    del materializations
+    if not isinstance(reduce_instructions, list):
+        reduce_instructions = [reduce_instructions] * len(inputs_to_reduce[0])
+    reduce_instructions_ = deque(reduce_instructions)
+    del reduce_instructions
+
+    reduced_materializations: deque[MultiOutputPartitionTask[PartitionT]] = deque()
+
+    # Materialize the reduces on the fanouts since we need all of them
+    # to perform the interweaving
+    while len(inputs_to_reduce[0]) > 0:
+        partition_batch = [_.popleft() for _ in inputs_to_reduce]
+        metadata_batch = [_.popleft() for _ in metadatas]
+        step = (
+            PartitionTaskBuilder[PartitionT](
+                inputs=partition_batch,
+                partial_metadatas=metadata_batch,
+                resource_request=ResourceRequest(
+                    memory_bytes=sum(metadata.size_bytes for metadata in metadata_batch),
+                ),
+            )
+            .add_instruction(instruction=reduce_instructions_.popleft())
+            .add_instruction(
+                instruction=execution_step.FanoutPadding(
+                    _num_outputs=2,
+                    left_padding=left,
+                    right_padding=right,
+                )
+            )
+            .finalize_partition_task_multi_output(stage_id=stage_id)
+        )
+        reduced_materializations.append(step)
+        yield step
+
+    while any(not _.done() for _ in reduced_materializations):
+        logger.debug("reduce blocked on completion of all sources in: %s", reduced_materializations)
+        yield None
+
+    # Seperate the left and right paddings to compute the appropriate
+    # coalesced prefixes to yield the correct final reduces in order
+    left_pads: deque[PartitionT] = deque()
+    center_partitions: deque[PartitionT] = deque()
+    right_pads: deque[PartitionT] = deque()
+    left_metas: deque[PartitionMetadata] = deque()
+    center_metas: deque[PartitionMetadata] = deque()
+    right_metas: deque[PartitionMetadata] = deque()
+    for res in reduced_materializations:
+        [left_pad, center, right_pad] = res.partitions()
+        left_pads.append(left_pad)
+        center_partitions.append(center)
+        right_pads.append(right_pad)
+
+        [left_meta, center_meta, right_meta] = res.partition_metadatas()
+        left_metas.append(left_meta)
+        center_metas.append(center_meta)
+        right_metas.append(right_meta)
+
+    del reduced_materializations
+
+    left_prefixes: deque[PartitionT] = deque()
+    right_suffixes: deque[PartitionT] = deque()
+    left_meta_prefixes: deque[PartitionMetadata] = deque()
+    right_meta_suffixes: deque[PartitionMetadata] = deque()
+    left_sum = 0
+    right_sum = 0
+    while len(center_partitions) > 0:
+        to_reduce = deque([center_partitions.popleft()])
+        to_reduce_meta = deque([center_metas.popleft()])
+        while right_sum < right and len(left_pads) > 0:
+            right_suffixes.append(left_pads.popleft())
+            padding_meta = left_metas.popleft()
+            right_meta_suffixes.append(padding_meta)
+            right_sum += padding_meta.num_rows
+
+        partition_batch = [left_prefixes + to_reduce + right_suffixes]
+        metadata_batch = [left_meta_prefixes + to_reduce_meta + right_meta_suffixes]
+        yield PartitionTaskBuilder[PartitionT](
+            inputs=partition_batch,
+            partial_metadatas=metadata_batch,
+            resource_request=ResourceRequest(
+                memory_bytes=sum(metadata.size_bytes for metadata in metadata_batch),
+            ),
+        ).add_instruction(instruction=execution_step.ReduceMerge())
+
+        left_prefixes.append(right_pads.popleft())
+        padding_meta = right_metas.popleft()
+        left_meta_prefixes.append(padding_meta)
+        left_sum += padding_meta.num_rows
+        while left_sum > left:
+            if left_sum - left_meta_prefixes[0].num_rows > left:
+                left_prefixes.popleft()
+                left_sum -= left_meta_prefixes[0].num_rows
+                left_meta_prefixes.popleft()
+
+        if len(right_suffixes) > 0:
+            right_suffixes.popleft()
+            right_sum -= right_meta_suffixes[0].num_rows
+            right_meta_suffixes.popleft()

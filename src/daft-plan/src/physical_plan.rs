@@ -64,6 +64,8 @@ pub enum PhysicalPlan {
     TabularWriteCsv(TabularWriteCsv),
     #[cfg(feature = "python")]
     IcebergWrite(IcebergWrite),
+    HashAsOfJoin(HashAsOfJoin),
+    RangeAsOfJoin(RangeAsOfJoin),
 }
 
 impl PhysicalPlan {
@@ -206,6 +208,44 @@ impl PhysicalPlan {
             Self::IcebergWrite(..) => {
                 ClusteringSpec::Unknown(UnknownClusteringConfig::new(1)).into()
             }
+            Self::HashAsOfJoin(HashAsOfJoin {
+                left,
+                right,
+                left_by,
+                ..
+            }) => {
+                let input_clustering_spec = left.clustering_spec();
+                match max(
+                    input_clustering_spec.num_partitions(),
+                    right.clustering_spec().num_partitions(),
+                ) {
+                    // NOTE: This duplicates the repartitioning logic in the planner, where we
+                    // conditionally repartition the left and right tables.
+                    // TODO(Clark): Consolidate this logic with the planner logic when we push the partition spec
+                    // to be an entirely planner-side concept.
+                    1 => input_clustering_spec,
+                    num_partitions => ClusteringSpec::Hash(HashClusteringConfig::new(
+                        num_partitions,
+                        left_by.clone(),
+                    ))
+                    .into(),
+                }
+            }
+            Self::RangeAsOfJoin(RangeAsOfJoin {
+                left,
+                right,
+                left_on,
+                ..
+            }) => ClusteringSpec::Range(RangeClusteringConfig::new(
+                max(
+                    left.clustering_spec().num_partitions(),
+                    right.clustering_spec().num_partitions(),
+                ),
+                left_on.clone(),
+                // TODO(Clark): Propagate descending vec once sort-merge join supports descending sort orders.
+                std::iter::repeat(false).take(left_on.len()).collect(),
+            ))
+            .into(),
         }
     }
 
@@ -260,7 +300,9 @@ impl PhysicalPlan {
                 ..
             })
             | Self::HashJoin(HashJoin { left, right, .. })
-            | Self::SortMergeJoin(SortMergeJoin { left, right, .. }) => {
+            | Self::SortMergeJoin(SortMergeJoin { left, right, .. })
+            | Self::HashAsOfJoin(HashAsOfJoin { left, right, .. })
+            | Self::RangeAsOfJoin(RangeAsOfJoin { left, right, .. }) => {
                 left.approximate_size_bytes().and_then(|left_size| {
                     right
                         .approximate_size_bytes()
@@ -312,6 +354,8 @@ impl PhysicalPlan {
             Self::SortMergeJoin(SortMergeJoin { left, right, .. }) => vec![left, right],
             Self::Concat(Concat { input, other }) => vec![input, other],
             Self::MonotonicallyIncreasingId(MonotonicallyIncreasingId { input, .. }) => vec![input],
+            Self::HashAsOfJoin(HashAsOfJoin { left, right, .. }) => vec![left, right],
+            Self::RangeAsOfJoin(RangeAsOfJoin { left, right, .. }) => vec![left, right],
         }
     }
 
@@ -360,6 +404,8 @@ impl PhysicalPlan {
                 }) => Self::BroadcastJoin(BroadcastJoin::new(input1.clone(), input2.clone(), left_on.clone(), right_on.clone(), *join_type, *is_swapped)),
                 Self::SortMergeJoin(SortMergeJoin { left_on, right_on, join_type, num_partitions, left_is_larger, needs_presort, .. }) => Self::SortMergeJoin(SortMergeJoin::new(input1.clone(), input2.clone(), left_on.clone(), right_on.clone(), *join_type, *num_partitions, *left_is_larger, *needs_presort)),
                 Self::Concat(_) => Self::Concat(Concat::new(input1.clone(), input2.clone())),
+                Self::HashAsOfJoin(HashAsOfJoin { left_on, right_on, left_by, right_by, join_direction, allow_exact_matches, .. }) => Self::HashAsOfJoin(HashAsOfJoin::new(input1.clone(), input2.clone(), left_on.clone(), right_on.clone(), left_by.clone(), right_by.clone(), *join_direction, *allow_exact_matches)),
+                Self::RangeAsOfJoin(RangeAsOfJoin { left_on, right_on, join_direction, allow_exact_matches, num_partitions, .. }) => Self::RangeAsOfJoin(RangeAsOfJoin::new(input1.clone(), input2.clone(), left_on.clone(), right_on.clone(), *join_direction, *allow_exact_matches, *num_partitions)),
                 _ => panic!("Physical op {:?} has one input, but got two", self),
             },
             _ => panic!("Physical ops should never have more than 2 inputs, but got: {}", children.len())
@@ -396,6 +442,8 @@ impl PhysicalPlan {
             Self::MonotonicallyIncreasingId(..) => "MonotonicallyIncreasingId",
             #[cfg(feature = "python")]
             Self::IcebergWrite(..) => "IcebergWrite",
+            Self::HashAsOfJoin(..) => "HashAsOfJoin",
+            Self::RangeAsOfJoin(..) => "RangeAsOfJoin",
         };
         name.to_string()
     }
@@ -434,6 +482,8 @@ impl PhysicalPlan {
             }
             #[cfg(feature = "python")]
             Self::IcebergWrite(iceberg_info) => iceberg_info.multiline_display(),
+            Self::HashAsOfJoin(hash_as_of_join) => hash_as_of_join.multiline_display(),
+            Self::RangeAsOfJoin(range_as_of_join) => range_as_of_join.multiline_display(),
         }
     }
 
@@ -1004,6 +1054,82 @@ impl PhysicalPlan {
                 iceberg_info,
                 input,
             }) => iceberg_write(py, input.to_partition_tasks(py, psets)?, iceberg_info),
+            PhysicalPlan::HashAsOfJoin(HashAsOfJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+                left_by,
+                right_by,
+                join_direction,
+                allow_exact_matches,
+            }) => {
+                let upstream_left_iter = left.to_partition_tasks(py, psets)?;
+                let upstream_right_iter = right.to_partition_tasks(py, psets)?;
+                let left_on_pyexprs: Vec<PyExpr> = left_on
+                    .iter()
+                    .map(|expr| PyExpr::from(expr.clone()))
+                    .collect();
+                let right_on_pyexprs: Vec<PyExpr> = right_on
+                    .iter()
+                    .map(|expr| PyExpr::from(expr.clone()))
+                    .collect();
+                let left_by_pyexprs: Vec<PyExpr> = left_by
+                    .iter()
+                    .map(|expr| PyExpr::from(expr.clone()))
+                    .collect();
+                let right_by_pyexprs: Vec<PyExpr> = right_by
+                    .iter()
+                    .map(|expr| PyExpr::from(expr.clone()))
+                    .collect();
+                let py_iter = py
+                    .import(pyo3::intern!(py, "daft.execution.rust_physical_plan_shim"))?
+                    .getattr(pyo3::intern!(py, "hash_asof_join"))?
+                    .call1((
+                        upstream_left_iter,
+                        upstream_right_iter,
+                        left_on_pyexprs,
+                        right_on_pyexprs,
+                        left_by_pyexprs,
+                        right_by_pyexprs,
+                        *join_direction,
+                        *allow_exact_matches,
+                    ))?;
+                Ok(py_iter.into())
+            }
+            PhysicalPlan::RangeAsOfJoin(RangeAsOfJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+                join_direction,
+                allow_exact_matches,
+                num_partitions,
+            }) => {
+                let upstream_left_iter = left.to_partition_tasks(py, psets)?;
+                let upstream_right_iter = right.to_partition_tasks(py, psets)?;
+                let left_on_pyexprs: Vec<PyExpr> = left_on
+                    .iter()
+                    .map(|expr| PyExpr::from(expr.clone()))
+                    .collect();
+                let right_on_pyexprs: Vec<PyExpr> = right_on
+                    .iter()
+                    .map(|expr| PyExpr::from(expr.clone()))
+                    .collect();
+                let py_iter = py
+                    .import(pyo3::intern!(py, "daft.execution.rust_physical_plan_shim"))?
+                    .getattr(pyo3::intern!(py, "range_asof_join"))?
+                    .call1((
+                        upstream_left_iter,
+                        upstream_right_iter,
+                        left_on_pyexprs,
+                        right_on_pyexprs,
+                        *join_direction,
+                        *allow_exact_matches,
+                        *num_partitions,
+                    ))?;
+                Ok(py_iter.into())
+            }
         }
     }
 }

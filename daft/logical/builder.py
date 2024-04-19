@@ -7,6 +7,7 @@ from daft.daft import (
     CountMode,
     FileFormat,
     IOConfig,
+    JoinDirection,
     JoinStrategy,
     JoinType,
     PyDaftExecutionConfig,
@@ -181,6 +182,27 @@ class LogicalPlanBuilder:
             return LogicalPlanBuilder(builder)
         else:
             raise NotImplementedError(f"{how} join not implemented.")
+
+    def merge_asof(
+        self,
+        right: LogicalPlanBuilder,
+        left_on: list[Expression],
+        right_on: list[Expression],
+        left_by: list[Expression],
+        right_by: list[Expression],
+        direction: JoinDirection,
+        allow_exact_matches: bool,
+    ) -> LogicalPlanBuilder:
+        builder = self._builder.merge_asof(
+            right._builder,
+            [expr._expr for expr in left_on],
+            [expr._expr for expr in right_on],
+            [expr._expr for expr in left_by],
+            [expr._expr for expr in right_by],
+            direction,
+            allow_exact_matches,
+        )
+        return LogicalPlanBuilder(builder)
 
     def concat(self, other: LogicalPlanBuilder) -> LogicalPlanBuilder:  # type: ignore[override]
         builder = self._builder.concat(other._builder)

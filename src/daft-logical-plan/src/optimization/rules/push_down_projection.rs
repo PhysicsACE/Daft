@@ -542,6 +542,7 @@ impl PushDownProjection {
             LogicalPlan::Sink(_) => {
                 panic!("Bad projection due to upstream sink node: {:?}", projection)
             }
+            LogicalPlan::Window(_) => Ok(Transformed::no(plan)),
         }
     }
 

@@ -36,6 +36,7 @@ impl TreeDisplay for PhysicalPlan {
             Self::DeltaLakeWrite(write) => write.display_as(level),
             #[cfg(feature = "python")]
             Self::LanceWrite(write) => write.display_as(level),
+            Self::PartitionedWindow(window) => window.display_as(level),
         }
     }
 

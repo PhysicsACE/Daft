@@ -19,9 +19,11 @@ impl Table {
         }
 
         if self.num_columns() == 1 {
-            return self
-                .get_column_by_index(0)?
-                .search_sorted(keys.get_column_by_index(0)?, *descending.first().unwrap());
+            return self.get_column_by_index(0)?.search_sorted(
+                keys.get_column_by_index(0)?,
+                *descending.first().unwrap(),
+                false,
+            );
         }
         unsafe {
             multicol_search_sorted(self.columns.as_slice(), keys.columns.as_slice(), descending)

@@ -21,7 +21,7 @@ use pyo3::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Expr, ExprRef, LiteralValue};
+use crate::{Expr, ExprRef, LiteralValue, WindowSpec};
 
 #[pyfunction]
 pub fn col(name: &str) -> PyResult<PyExpr> {
@@ -509,6 +509,58 @@ impl PyExpr {
         use crate::functions::partitioning::iceberg_truncate;
         Ok(iceberg_truncate(self.into(), w).into())
     }
+
+    pub fn rank(&self) -> PyResult<Self> {
+        Ok(self.expr.clone().rank().into())
+    }
+
+    pub fn dense_rank(&self) -> PyResult<Self> {
+        Ok(self.expr.clone().dense_rank().into())
+    }
+
+    pub fn cume_dist(&self) -> PyResult<Self> {
+        Ok(self.expr.clone().cume_dist().into())
+    }
+
+    pub fn row_number(&self) -> PyResult<Self> {
+        Ok(self.expr.clone().row_number().into())
+    }
+
+    pub fn percent_rank(&self) -> PyResult<Self> {
+        Ok(self.expr.clone().percent_rank().into())
+    }
+
+    pub fn lead(&self, offset: &Self, default: &Self) -> PyResult<Self> {
+        Ok(self
+            .expr
+            .clone()
+            .lead(offset.expr.clone(), default.expr.clone())
+            .into())
+    }
+
+    pub fn lag(&self, offset: &Self, default: &Self) -> PyResult<Self> {
+        Ok(self
+            .expr
+            .clone()
+            .lag(offset.expr.clone(), default.expr.clone())
+            .into())
+    }
+
+    pub fn first(&self) -> PyResult<Self> {
+        Ok(self.expr.clone().first().into())
+    }
+
+    pub fn last(&self) -> PyResult<Self> {
+        Ok(self.expr.clone().last().into())
+    }
+
+    pub fn nth(&self, n: &Self) -> PyResult<Self> {
+        Ok(self.expr.clone().nth(n.expr.clone()).into())
+    }
+
+    pub fn over(&self, window_spec: PyWindowSpec) -> PyResult<Self> {
+        Ok(self.expr.clone().over(window_spec.into()).into())
+    }
 }
 
 impl_bincode_py_state_serialization!(PyExpr);
@@ -536,5 +588,67 @@ impl From<PyExpr> for crate::ExprRef {
 impl From<&PyExpr> for crate::ExprRef {
     fn from(item: &PyExpr) -> Self {
         item.expr.clone()
+    }
+}
+
+#[pyclass(module = "daft.daft", name = "WindowSpec", frozen)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+pub struct PyWindowSpec(pub Arc<WindowSpec>);
+
+#[pymethods]
+impl PyWindowSpec {
+    #[allow(clippy::too_many_arguments)]
+    #[staticmethod]
+    #[pyo3(signature = (partition_by, order_by, descending, range, left_bound=None, right_bound=None))]
+    pub fn from_user_defined_spec(
+        partition_by: Vec<PyExpr>,
+        order_by: Vec<PyExpr>,
+        descending: Vec<bool>,
+        range: bool,
+        left_bound: Option<PyExpr>,
+        right_bound: Option<PyExpr>,
+    ) -> PyResult<Self> {
+        let partitionBy = partition_by
+            .iter()
+            .map(|e| e.expr.clone())
+            .collect::<Vec<ExprRef>>();
+
+        let orderBy = order_by
+            .iter()
+            .map(|e| e.expr.clone())
+            .collect::<Vec<ExprRef>>();
+
+        let left_bound = match left_bound {
+            Some(e) => Some(e.expr),
+            None => None,
+        };
+
+        let right_bound = match right_bound {
+            Some(e) => Some(e.expr),
+            None => None,
+        };
+
+        let window_spec = WindowSpec::new(
+            partitionBy,
+            orderBy,
+            descending,
+            left_bound,
+            right_bound,
+            range,
+        );
+
+        Ok(Self(window_spec.into()))
+    }
+}
+
+impl From<Arc<WindowSpec>> for PyWindowSpec {
+    fn from(value: Arc<WindowSpec>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<PyWindowSpec> for Arc<WindowSpec> {
+    fn from(value: PyWindowSpec) -> Self {
+        value.0
     }
 }

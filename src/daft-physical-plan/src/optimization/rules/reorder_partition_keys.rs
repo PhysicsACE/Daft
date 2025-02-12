@@ -148,7 +148,8 @@ impl PhysicalOptimizerRule for ReorderPartitionKeys {
                 PhysicalPlan::Pivot(..) |
                 PhysicalPlan::TabularWriteCsv(..) |
                 PhysicalPlan::TabularWriteJson(..) |
-                PhysicalPlan::TabularWriteParquet(..) => Ok(Transformed::no(c.propagate())),
+                PhysicalPlan::TabularWriteParquet(..) |
+                PhysicalPlan::PartitionedWindow(..) => Ok(Transformed::no(c.propagate())),
 
                 // the rest should have been dealt with earlier
                 PhysicalPlan::ShuffleExchange(ShuffleExchange {strategy: ShuffleExchangeStrategy::SplitOrCoalesceToTargetNum { .. }, ..}) |

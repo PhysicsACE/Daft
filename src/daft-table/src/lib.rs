@@ -21,7 +21,7 @@ use daft_core::{
 };
 use daft_dsl::{
     col, functions::FunctionEvaluator, null_lit, AggExpr, ApproxPercentileParams, Expr, ExprRef,
-    LiteralValue, SketchType,
+    LiteralValue, NavigationFn, NumberingFn, SketchType, WindowFn,
 };
 use daft_logical_plan::FileInfos;
 use num_traits::ToPrimitive;
@@ -463,6 +463,102 @@ impl Table {
         Ok(self.columns.get(idx).unwrap())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn eval_window_expression(
+        &self,
+        window_expr: &WindowFn,
+        groups: Option<&GroupIndices>,
+        cumulative: bool,
+        left_row: Option<u64>,
+        right_row: Option<u64>,
+        left_ranges: Option<&Vec<Vec<u64>>>,
+        right_ranges: Option<&Vec<Vec<u64>>>,
+        range: bool,
+    ) -> DaftResult<Series> {
+        match window_expr {
+            WindowFn::Aggregate(agg_expr) => match agg_expr {
+                AggExpr::Sum(expr) => {
+                    if cumulative {
+                        return self.eval_expression(expr)?.windowed_sum(groups);
+                    }
+
+                    if !range {
+                        self.eval_expression(expr)?
+                            .windowed_row_sum(groups, left_row, right_row)
+                    } else {
+                        let left_ranges = left_ranges.unwrap();
+                        let right_ranges = right_ranges.unwrap();
+                        self.eval_expression(expr)?.windowed_range_sum(
+                            groups,
+                            left_ranges,
+                            right_ranges,
+                        )
+                    }
+                }
+                _ => Err(DaftError::ValueError(
+                    "Only sum window function is available right now".to_string(),
+                )),
+            },
+            WindowFn::Numbering(numbering_fn) => match numbering_fn {
+                NumberingFn::Rank(expr) => {
+                    if cumulative {
+                        self.eval_expression(expr)?.rank(groups)
+                    } else {
+                        Err(DaftError::ValueError(
+                            "Framing for rank is not supported yet".to_string(),
+                        ))
+                    }
+                }
+                _ => Err(DaftError::ValueError(
+                    "Only rank window function is available right now".to_string(),
+                )),
+            },
+            WindowFn::Navigation(navigation_fn) => match navigation_fn {
+                NavigationFn::Lead(expr, offset, default) => {
+                    if cumulative {
+                        let default_series = match default.as_ref() {
+                            Expr::Literal(lit_value) => lit_value.to_series(),
+                            _ => {
+                                return Err(DaftError::ValueError(
+                                    "Default value must be a literal".to_string(),
+                                ));
+                            }
+                        };
+
+                        let offset_literal = match offset.as_ref() {
+                            Expr::Literal(lit_value) => match lit_value {
+                                LiteralValue::Int32(val) => *val as u64,
+                                LiteralValue::Int64(val) => *val as u64,
+                                LiteralValue::UInt32(val) => *val as u64,
+                                LiteralValue::UInt64(val) => *val,
+                                _ => {
+                                    return Err(DaftError::ValueError(
+                                        "Offset must be an integer".to_string(),
+                                    ));
+                                }
+                            },
+                            _ => {
+                                return Err(DaftError::ValueError(
+                                    "Offset value must be a literal".to_string(),
+                                ));
+                            }
+                        };
+
+                        self.eval_expression(expr)?
+                            .lead(offset_literal, &default_series, groups)
+                    } else {
+                        Err(DaftError::ValueError(
+                            "Framing for lead is not supported yet".to_string(),
+                        ))
+                    }
+                }
+                _ => Err(DaftError::ValueError(
+                    "Only lead window function is available right now".to_string(),
+                )),
+            },
+        }
+    }
+
     fn eval_agg_expression(
         &self,
         agg_expr: &AggExpr,
@@ -641,6 +737,12 @@ impl Table {
             )),
             Expr::OuterReferenceColumn { .. } => Err(DaftError::ComputeError(
                 "Outer reference columns should be optimized away before evaluation. This indicates a bug in the query optimizer.".to_string(),
+            )),
+            Expr::Over { .. } => Err(DaftError::ComputeError(
+                "OVER should be optimized away before evaluation. This indicates a bug in the query optimizer.".to_string(),
+            )),
+            Expr::WindowExpression(..) => Err(DaftError::ComputeError(
+                "Window expression eval is not implemented. This indicates a bug in the query optimizer.".to_string(),
             )),
         }?;
 

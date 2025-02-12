@@ -176,6 +176,52 @@ pub enum Expr {
 
     #[display("{_0}")]
     OuterReferenceColumn(OuterReferenceColumn),
+
+    #[display("{_0}")]
+    Over(ExprRef, WindowSpecRef),
+
+    #[display("{_0}")]
+    WindowExpression(WindowFn),
+}
+
+pub type WindowSpecRef = Arc<WindowSpec>;
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Eq, Hash)]
+pub struct WindowSpec {
+    pub partition_by: Vec<ExprRef>,
+    pub order_by: Vec<ExprRef>,
+    pub descending: Vec<bool>,
+    pub left_bound: Option<ExprRef>,
+    pub right_bound: Option<ExprRef>,
+    pub range: bool,
+}
+
+impl WindowSpec {
+    pub fn new(
+        partition_by: Vec<ExprRef>,
+        order_by: Vec<ExprRef>,
+        descending: Vec<bool>,
+        left_bound: Option<ExprRef>,
+        right_bound: Option<ExprRef>,
+        range: bool,
+    ) -> Self {
+        Self {
+            partition_by,
+            order_by,
+            descending,
+            left_bound,
+            right_bound,
+            range,
+        }
+    }
+
+    pub fn has_frame(&self) -> bool {
+        self.left_bound.is_some() || self.right_bound.is_some()
+    }
+
+    pub fn is_range(&self) -> bool {
+        self.range
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash, Eq)]
@@ -535,6 +581,212 @@ impl From<&AggExpr> for ExprRef {
     }
 }
 
+#[derive(Display, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum WindowFn {
+    Aggregate(AggExpr),
+    Numbering(NumberingFn),
+    Navigation(NavigationFn),
+}
+
+#[derive(Display, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum NumberingFn {
+    #[display("rank({_0})")]
+    Rank(ExprRef),
+    #[display("dense_rank({_0})")]
+    DenseRank(ExprRef),
+    #[display("cume_dist({_0})")]
+    CumeDist(ExprRef),
+    #[display("percent_rank({_0})")]
+    PercentRank(ExprRef),
+    #[display("row_number({_0})")]
+    RowNumber(ExprRef),
+}
+
+#[derive(Display, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum NavigationFn {
+    #[display("lead({_0}, {_1}, {_2})")]
+    Lead(ExprRef, ExprRef, ExprRef),
+    #[display("lag({_0}, {_1}, {_2})")]
+    Lag(ExprRef, ExprRef, ExprRef),
+    #[display("first({_0})")]
+    First(ExprRef),
+    #[display("last({_0})")]
+    Last(ExprRef),
+    #[display("nth({_0}, {_1})")]
+    Nth(ExprRef, ExprRef),
+}
+
+impl NavigationFn {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Lead(expr, _, _)
+            | Self::Lag(expr, _, _)
+            | Self::First(expr)
+            | Self::Last(expr)
+            | Self::Nth(expr, _) => expr.name(),
+        }
+    }
+
+    pub fn semantic_id(&self, schema: &Schema) -> FieldID {
+        match self {
+            Self::Lead(expr, offset, default) => {
+                let child_id = expr.semantic_id(schema);
+                let offset_id = offset.semantic_id(schema);
+                let default_id = default.semantic_id(schema);
+                FieldID::new(format!(
+                    "{child_id}.lead(offset={offset_id},default={default_id})",
+                ))
+            }
+            Self::Lag(expr, offset, default) => {
+                let child_id = expr.semantic_id(schema);
+                let offset_id = offset.semantic_id(schema);
+                let default_id = default.semantic_id(schema);
+                FieldID::new(format!(
+                    "{child_id}.lag(offset={offset_id},default={default_id})",
+                ))
+            }
+            Self::First(expr) => {
+                let child_id = expr.semantic_id(schema);
+                FieldID::new(format!("{child_id}.first()"))
+            }
+            Self::Last(expr) => {
+                let child_id = expr.semantic_id(schema);
+                FieldID::new(format!("{child_id}.last()"))
+            }
+            Self::Nth(expr, nth) => {
+                let child_id = expr.semantic_id(schema);
+                let nth_id = nth.semantic_id(schema);
+                FieldID::new(format!("{child_id}.nth(n={nth_id})"))
+            }
+        }
+    }
+
+    pub fn children(&self) -> Vec<ExprRef> {
+        match self {
+            Self::Lead(expr, _, _)
+            | Self::Lag(expr, _, _)
+            | Self::First(expr)
+            | Self::Last(expr)
+            | Self::Nth(expr, _) => vec![expr.clone()],
+        }
+    }
+
+    pub fn with_new_children(&self, mut children: Vec<ExprRef>) -> Self {
+        let mut first_child = || children.pop().unwrap();
+        match self {
+            Self::Lead(_, offset, default) => {
+                Self::Lead(first_child(), offset.clone(), default.clone())
+            }
+            Self::Lag(_, offset, default) => {
+                Self::Lag(first_child(), offset.clone(), default.clone())
+            }
+            Self::First(_) => Self::First(first_child()),
+            Self::Last(_) => Self::Last(first_child()),
+            Self::Nth(_, nth) => Self::Nth(first_child(), nth.clone()),
+        }
+    }
+
+    pub fn to_field(&self, schema: &Schema) -> DaftResult<Field> {
+        match self {
+            Self::Lead(expr, _, _)
+            | Self::Lag(expr, _, _)
+            | Self::First(expr)
+            | Self::Last(expr)
+            | Self::Nth(expr, _) => {
+                let field = expr.to_field(schema)?;
+                Ok(Field::new(field.name.as_str(), field.dtype))
+            }
+        }
+    }
+}
+
+impl From<&NavigationFn> for ExprRef {
+    fn from(navigation_fn: &NavigationFn) -> Self {
+        Self::new(Expr::WindowExpression(WindowFn::Navigation(
+            navigation_fn.clone(),
+        )))
+    }
+}
+
+impl NumberingFn {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Rank(expr)
+            | Self::DenseRank(expr)
+            | Self::CumeDist(expr)
+            | Self::PercentRank(expr)
+            | Self::RowNumber(expr) => expr.name(),
+        }
+    }
+
+    pub fn semantic_id(&self, schema: &Schema) -> FieldID {
+        match self {
+            Self::Rank(expr) => {
+                let child_id = expr.semantic_id(schema);
+                FieldID::new(format!("{child_id}.rank()"))
+            }
+            Self::DenseRank(expr) => {
+                let child_id = expr.semantic_id(schema);
+                FieldID::new(format!("{child_id}.dense_rank()"))
+            }
+            Self::CumeDist(expr) => {
+                let child_id = expr.semantic_id(schema);
+                FieldID::new(format!("{child_id}.cume_dist()"))
+            }
+            Self::PercentRank(expr) => {
+                let child_id = expr.semantic_id(schema);
+                FieldID::new(format!("{child_id}.percent_rank()"))
+            }
+            Self::RowNumber(expr) => {
+                let child_id = expr.semantic_id(schema);
+                FieldID::new(format!("{child_id}.row_number()"))
+            }
+        }
+    }
+
+    pub fn children(&self) -> Vec<ExprRef> {
+        match self {
+            Self::Rank(expr)
+            | Self::DenseRank(expr)
+            | Self::CumeDist(expr)
+            | Self::PercentRank(expr)
+            | Self::RowNumber(expr) => vec![expr.clone()],
+        }
+    }
+
+    pub fn with_new_children(&self, mut children: Vec<ExprRef>) -> Self {
+        let mut first_child = || children.pop().unwrap();
+        match self {
+            Self::Rank(_) => Self::Rank(first_child()),
+            Self::DenseRank(_) => Self::DenseRank(first_child()),
+            Self::CumeDist(_) => Self::CumeDist(first_child()),
+            Self::PercentRank(_) => Self::PercentRank(first_child()),
+            Self::RowNumber(_) => Self::RowNumber(first_child()),
+        }
+    }
+
+    pub fn to_field(&self, schema: &Schema) -> DaftResult<Field> {
+        match self {
+            Self::Rank(expr)
+            | Self::DenseRank(expr)
+            | Self::CumeDist(expr)
+            | Self::PercentRank(expr)
+            | Self::RowNumber(expr) => {
+                let field = expr.to_field(schema)?;
+                Ok(Field::new(field.name.as_str(), field.dtype))
+            }
+        }
+    }
+}
+
+impl From<&NumberingFn> for ExprRef {
+    fn from(numbering_fn: &NumberingFn) -> Self {
+        Self::new(Expr::WindowExpression(WindowFn::Numbering(
+            numbering_fn.clone(),
+        )))
+    }
+}
+
 impl AsRef<Self> for Expr {
     fn as_ref(&self) -> &Self {
         self
@@ -695,6 +947,56 @@ impl Expr {
         Self::InSubquery(self, subquery).into()
     }
 
+    pub fn rank(self: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Numbering(NumberingFn::Rank(self))).into()
+    }
+
+    pub fn dense_rank(self: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Numbering(NumberingFn::DenseRank(self))).into()
+    }
+
+    pub fn cume_dist(self: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Numbering(NumberingFn::CumeDist(self))).into()
+    }
+
+    pub fn percent_rank(self: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Numbering(NumberingFn::PercentRank(self))).into()
+    }
+
+    pub fn row_number(self: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Numbering(NumberingFn::RowNumber(self))).into()
+    }
+
+    pub fn lead(self: ExprRef, offset: ExprRef, default: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Navigation(NavigationFn::Lead(
+            self, offset, default,
+        )))
+        .into()
+    }
+
+    pub fn lag(self: ExprRef, offset: ExprRef, default: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Navigation(NavigationFn::Lag(
+            self, offset, default,
+        )))
+        .into()
+    }
+
+    pub fn first(self: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Navigation(NavigationFn::First(self))).into()
+    }
+
+    pub fn last(self: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Navigation(NavigationFn::Last(self))).into()
+    }
+
+    pub fn nth(self: ExprRef, nth: ExprRef) -> ExprRef {
+        Self::WindowExpression(WindowFn::Navigation(NavigationFn::Nth(self, nth))).into()
+    }
+
+    pub fn over(self: ExprRef, window_spec: WindowSpecRef) -> ExprRef {
+        Self::Over(self, window_spec).into()
+    }
+
     pub fn semantic_id(&self, schema: &Schema) -> FieldID {
         match self {
             // Base case - anonymous column reference.
@@ -785,6 +1087,12 @@ impl Expr {
                 let depth = c.depth;
                 FieldID::new(format!("outer_col({name}, {depth})"))
             }
+            Self::Over(expr, _) => expr.semantic_id(schema),
+            Self::WindowExpression(window_fn) => match window_fn {
+                WindowFn::Navigation(navigation_fn) => navigation_fn.semantic_id(schema),
+                WindowFn::Aggregate(agg_fn) => agg_fn.semantic_id(schema),
+                WindowFn::Numbering(numbering_fn) => numbering_fn.semantic_id(schema),
+            },
         }
     }
 
@@ -827,6 +1135,12 @@ impl Expr {
             }
             Self::FillNull(expr, fill_value) => vec![expr.clone(), fill_value.clone()],
             Self::ScalarFunction(sf) => sf.inputs.clone(),
+            Self::Over(expr, _) => vec![expr.clone()],
+            Self::WindowExpression(window_fn) => match window_fn {
+                WindowFn::Navigation(navigation_fn) => navigation_fn.children(),
+                WindowFn::Aggregate(agg_fn) => agg_fn.children(),
+                WindowFn::Numbering(numbering_fn) => numbering_fn.children(),
+            },
         }
     }
 
@@ -929,6 +1243,21 @@ impl Expr {
                     inputs: children,
                 })
             }
+            Self::Over(_, window_spec) => Self::Over(
+                children.first().expect("Should have 1 child").clone(),
+                window_spec.clone(),
+            ),
+            Self::WindowExpression(window_fn) => match window_fn {
+                WindowFn::Navigation(navigation_fn) => Self::WindowExpression(
+                    WindowFn::Navigation(navigation_fn.with_new_children(children)),
+                ),
+                WindowFn::Aggregate(agg_fn) => {
+                    Self::WindowExpression(WindowFn::Aggregate(agg_fn.with_new_children(children)))
+                }
+                WindowFn::Numbering(numbering_fn) => Self::WindowExpression(WindowFn::Numbering(
+                    numbering_fn.with_new_children(children),
+                )),
+            },
         }
     }
 
@@ -1103,6 +1432,12 @@ impl Expr {
             Self::InSubquery(expr, _) => Ok(Field::new(expr.name(), DataType::Boolean)),
             Self::Exists(_) => Ok(Field::new("exists", DataType::Boolean)),
             Self::OuterReferenceColumn(c) => Ok(c.field.clone()),
+            Self::Over(expr, _) => Ok(expr.to_field(schema)?),
+            Self::WindowExpression(window_fn) => match window_fn {
+                WindowFn::Aggregate(agg_expr) => agg_expr.to_field(schema),
+                WindowFn::Numbering(numbering_fn) => numbering_fn.to_field(schema),
+                WindowFn::Navigation(navigation_fn) => navigation_fn.to_field(schema),
+            },
         }
     }
 
@@ -1138,6 +1473,12 @@ impl Expr {
             Self::InSubquery(expr, _) => expr.name(),
             Self::Exists(subquery) => subquery.name(),
             Self::OuterReferenceColumn(c) => &c.field.name,
+            Self::Over(expr, _) => expr.name(),
+            Self::WindowExpression(window_fn) => match window_fn {
+                WindowFn::Aggregate(agg_expr) => agg_expr.name(),
+                WindowFn::Numbering(numbering_fn) => numbering_fn.name(),
+                WindowFn::Navigation(navigation_fn) => navigation_fn.name(),
+            },
         }
     }
 
@@ -1216,7 +1557,9 @@ impl Expr {
                 | Expr::Subquery(..)
                 | Expr::InSubquery(..)
                 | Expr::Exists(..)
-                | Expr::OuterReferenceColumn(..) => Err(io::Error::new(
+                | Expr::OuterReferenceColumn(..)
+                | Expr::Over(..)
+                | Expr::WindowExpression(..) => Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Unsupported expression for SQL translation",
                 )),
@@ -1343,6 +1686,105 @@ pub fn has_agg(expr: &ExprRef) -> bool {
     expr.exists(|e| matches!(e.as_ref(), Expr::Agg(_)))
 }
 
+pub fn has_over(expr: &ExprRef) -> bool {
+    expr.exists(|e| matches!(e.as_ref(), Expr::Over { .. }))
+}
+
+pub fn has_window_fn(expr: &ExprRef) -> bool {
+    expr.exists(|e| matches!(e.as_ref(), Expr::WindowExpression(_)))
+}
+
+pub fn extract_window_frame(expr: &ExprRef) -> DaftResult<WindowSpecRef> {
+    match expr.as_ref() {
+        Expr::Over(_, window_spec) => Ok(window_spec.clone()),
+        Expr::Alias(child, ..) => extract_window_frame(child),
+        _ => Err(DaftError::ComputeError(
+            "Over expression must be top level expression".to_string(),
+        )),
+    }
+}
+
+pub fn extract_window_fn(expr: &ExprRef) -> DaftResult<WindowFn> {
+    match expr.as_ref() {
+        Expr::Over(window_fn, ..) => match window_fn.as_ref() {
+            Expr::Agg(agg_expr) => {
+                Ok(WindowFn::Aggregate(agg_expr.clone()))
+            }
+            Expr::WindowExpression(window_expr) => Ok(window_expr.clone()),
+            _ => Err(DaftError::ComputeError(
+                "Over expression must be applied to a window function".to_string(),
+            )),
+        },
+        Expr::Alias(child, name) => extract_window_fn(child).map(|window_fn| {
+            match window_fn {
+                WindowFn::Aggregate(agg_expr) => {
+                    match agg_expr {
+                        AggExpr::Sum(e) => {
+                            Ok(WindowFn::Aggregate(AggExpr::Sum(Expr::Alias(e, name.clone()).into())))
+                        }
+                        AggExpr::Mean(e) => {
+                            Ok(WindowFn::Aggregate(AggExpr::Mean(Expr::Alias(e, name.clone()).into())))
+                        }
+                        AggExpr::Min(e) => {
+                            Ok(WindowFn::Aggregate(AggExpr::Min(Expr::Alias(e, name.clone()).into())))
+                        }
+                        AggExpr::Max(e) => {
+                            Ok(WindowFn::Aggregate(AggExpr::Max(Expr::Alias(e, name.clone()).into())))
+                        }
+                        AggExpr::Stddev(e) => {
+                            Ok(WindowFn::Aggregate(AggExpr::Stddev(Expr::Alias(e, name.clone()).into())))
+                        }
+                        _ => Err(DaftError::ComputeError(
+                            "Only sum, mean, min, max, and stddev are supported as window aggregates for now".to_string(),
+                        ))
+                    }
+                }
+                WindowFn::Numbering(numbering_fn) => {
+                    match numbering_fn {
+                        NumberingFn::Rank(e) => {
+                            Ok(WindowFn::Numbering(NumberingFn::Rank(Expr::Alias(e, name.clone()).into())))
+                        }
+                        NumberingFn::DenseRank(e) => {
+                            Ok(WindowFn::Numbering(NumberingFn::DenseRank(Expr::Alias(e, name.clone()).into())))
+                        }
+                        NumberingFn::PercentRank(e) => {
+                            Ok(WindowFn::Numbering(NumberingFn::PercentRank(Expr::Alias(e, name.clone()).into())))
+                        }
+                        NumberingFn::CumeDist(e) => {
+                            Ok(WindowFn::Numbering(NumberingFn::CumeDist(Expr::Alias(e, name.clone()).into())))
+                        }
+                        NumberingFn::RowNumber(e) => {
+                            Ok(WindowFn::Numbering(NumberingFn::RowNumber(Expr::Alias(e, name.clone()).into())))
+                        }
+                    }
+                }
+                WindowFn::Navigation(navigation_fn) => {
+                    match navigation_fn {
+                        NavigationFn::First(e) => {
+                            Ok(WindowFn::Navigation(NavigationFn::First(Expr::Alias(e, name.clone()).into())))
+                        }
+                        NavigationFn::Last(e) => {
+                            Ok(WindowFn::Navigation(NavigationFn::Last(Expr::Alias(e, name.clone()).into())))
+                        }
+                        NavigationFn::Nth(e, nth) => {
+                            Ok(WindowFn::Navigation(NavigationFn::Nth(Expr::Alias(e, name.clone()).into(), nth)))
+                        }
+                        NavigationFn::Lead(e, offset, default) => {
+                            Ok(WindowFn::Navigation(NavigationFn::Lead(Expr::Alias(e, name.clone()).into(), offset, default)))
+                        }
+                        NavigationFn::Lag(e, offset, default) => {
+                            Ok(WindowFn::Navigation(NavigationFn::Lag(Expr::Alias(e, name.clone()).into(), offset, default)))
+                        }
+                    }
+                }
+            }
+        })?,
+        _ => Err(DaftError::ComputeError(
+            "Over expression must be top level expression".to_string(),
+        )),
+    }
+}
+
 #[inline]
 pub fn is_actor_pool_udf(expr: &ExprRef) -> bool {
     matches!(
@@ -1451,6 +1893,8 @@ pub fn estimated_selectivity(expr: &Expr, schema: &Schema) -> f64 {
         Expr::Subquery(_) => 1.0,
         Expr::Agg(_) => panic!("Aggregates are not allowed in WHERE clauses"),
         Expr::List(_) => 1.0,
+        Expr::WindowExpression(_) => panic!("Window expressions are not allowed in WHERE clauses"),
+        Expr::Over { .. } => panic!("Over is not allowed in WHERE clauses"),
     };
 
     // Lower bound to 1% to prevent overly selective estimate

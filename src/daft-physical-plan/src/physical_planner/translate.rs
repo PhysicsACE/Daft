@@ -23,6 +23,7 @@ use daft_logical_plan::{
         MonotonicallyIncreasingId as LogicalMonotonicallyIncreasingId, Pivot as LogicalPivot,
         Project as LogicalProject, Repartition as LogicalRepartition, Sample as LogicalSample,
         Sink as LogicalSink, Sort as LogicalSort, Source, Unpivot as LogicalUnpivot,
+        Window as LogicalWindow,
     },
     partitioning::{
         ClusteringSpec, HashClusteringConfig, RangeClusteringConfig, UnknownClusteringConfig,
@@ -803,6 +804,53 @@ pub(super) fn translate_single_logical_node(
         LogicalPlan::Union(_) => Err(DaftError::InternalError(
             "Union should already be optimized away".to_string(),
         )),
+        LogicalPlan::Window(LogicalWindow {
+            window_spec,
+            window_fns,
+            window_names,
+            ..
+        }) => {
+            if window_spec.partition_by.is_empty() {
+                return Err(DaftError::InternalError(
+                    "Windowing operations without a partition by clause are not yet supported"
+                        .to_string(),
+                ));
+            }
+
+            let input_physical = physical_children.pop().expect("requires 1 input");
+            let input_clustering_spec = input_physical.clustering_spec();
+            let num_input_partitions = input_clustering_spec.num_partitions();
+            let resultplan = match num_input_partitions {
+                1 => PhysicalPlan::PartitionedWindow(PartitionedWindow::new(
+                    input_physical,
+                    window_spec.clone(),
+                    window_fns.clone(),
+                    window_names.clone(),
+                )),
+                _ => {
+                    let gather_plan = PhysicalPlan::ShuffleExchange(
+                        ShuffleExchangeFactory::new(input_physical).get_hash_partitioning(
+                            window_spec.partition_by.clone(),
+                            min(
+                                num_input_partitions,
+                                cfg.shuffle_aggregation_default_partitions,
+                            ),
+                            Some(cfg),
+                        ),
+                    )
+                    .into();
+
+                    PhysicalPlan::PartitionedWindow(PartitionedWindow::new(
+                        gather_plan,
+                        window_spec.clone(),
+                        window_fns.clone(),
+                        window_names.clone(),
+                    ))
+                }
+            };
+
+            Ok(resultplan.arced())
+        }
     }?;
     // TODO(desmond): We can't perform this check for now because ScanTasks currently provide
     // different size estimations depending on when the approximation is computed. Once we fix

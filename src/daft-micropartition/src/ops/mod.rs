@@ -10,3 +10,4 @@ mod slice;
 mod sort;
 mod take;
 mod unpivot;
+mod window;

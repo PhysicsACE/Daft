@@ -17,6 +17,7 @@ from daft.daft import (
 from daft.daft import PyMicroPartition as _PyMicroPartition
 from daft.daft import PyTable as _PyTable
 from daft.daft import ScanTask as _ScanTask
+from daft.daft import WindowSpec as _WindowSpec
 from daft.datatype import DataType, TimeUnit
 from daft.expressions import Expression, ExpressionsProjection
 from daft.logical.schema import Schema
@@ -244,6 +245,14 @@ class MicroPartition:
         values_column_pyexpr = values_column._expr
         return MicroPartition._from_pymicropartition(
             self._micropartition.pivot(group_by_pyexprs, pivot_column_pyexpr, values_column_pyexpr, names)
+        )
+
+    def partitioned_window(
+        self, window_spec: _WindowSpec, window_fns: list[Expression], window_names: list[str]
+    ) -> MicroPartition:
+        window_fns_pyexprs = [e._expr for e in window_fns]
+        return MicroPartition._from_pymicropartition(
+            self._micropartition.partitioned_window(window_spec, window_fns_pyexprs, window_names)
         )
 
     def quantiles(self, num: int) -> MicroPartition:

@@ -15,7 +15,7 @@ use common_file_formats::FileFormat;
 use common_io_config::IOConfig;
 use common_scan_info::{PhysicalScanInfo, Pushdowns, ScanOperatorRef};
 use daft_core::join::{JoinStrategy, JoinType};
-use daft_dsl::{col, ExprRef};
+use daft_dsl::{col, extract_window_fn, Expr, ExprRef};
 use daft_schema::schema::{Schema, SchemaRef};
 use indexmap::IndexSet;
 #[cfg(feature = "python")]
@@ -209,6 +209,33 @@ impl LogicalPlanBuilder {
 
     pub fn with_columns(&self, columns: Vec<ExprRef>) -> DaftResult<Self> {
         let expr_resolver = ExprResolver::builder().allow_actor_pool_udf(true).build();
+
+        if expr_resolver.has_window_clause(columns.clone()) {
+            let window_spec = expr_resolver.resolve_windows(columns.clone())?;
+            let window_fns = columns
+                .iter()
+                .map(extract_window_fn)
+                .collect::<DaftResult<Vec<_>>>()?;
+
+            let window_fn_exprs = window_fns
+                .iter()
+                .map(|e| Arc::new(Expr::WindowExpression(e.clone())))
+                .collect::<Vec<_>>();
+
+            let window_names = columns
+                .iter()
+                .map(|e| e.name().to_string())
+                .collect::<Vec<_>>();
+
+            let logical_plan: LogicalPlan = ops::Window::try_new(
+                self.plan.clone(),
+                window_spec,
+                window_fn_exprs,
+                window_names,
+            )?
+            .into();
+            return Ok(self.with_new_plan(logical_plan));
+        }
 
         let (columns, _) = expr_resolver.resolve(columns, &self.schema())?;
 

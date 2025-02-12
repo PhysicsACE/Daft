@@ -21,6 +21,7 @@ import daft.daft as native
 from daft import context
 from daft.daft import CountMode, ImageFormat, ImageMode, ResourceRequest, initialize_udfs
 from daft.daft import PyExpr as _PyExpr
+from daft.daft import WindowSpec as _WindowSpec
 from daft.daft import col as _col
 from daft.daft import date_lit as _date_lit
 from daft.daft import decimal_lit as _decimal_lit
@@ -1338,6 +1339,146 @@ class Expression:
 
     def _initialize_udfs(self) -> Expression:
         return Expression._from_pyexpr(initialize_udfs(self._expr))
+
+    def rank(self) -> Expression:
+        expr = self._expr.rank()
+        return Expression._from_pyexpr(expr)
+
+    def dense_rank(self) -> Expression:
+        expr = self._expr.dense_rank()
+        return Expression._from_pyexpr(expr)
+
+    def cume_dist(self) -> Expression:
+        expr = self._expr.cume_dist()
+        return Expression._from_pyexpr(expr)
+
+    def row_number(self) -> Expression:
+        expr = self._expr.row_number()
+        return Expression._from_pyexpr(expr)
+
+    def percent_rank(self) -> Expression:
+        expr = self._expr.percent_rank()
+        return Expression._from_pyexpr(expr)
+
+    def lead(self, offset: object, default: object = None) -> Expression:
+        offset_lit = lit(offset)
+        default_lit = lit(default)
+        expr = self._expr.lead(offset_lit._expr, default_lit._expr)
+        return Expression._from_pyexpr(expr)
+
+    def lag(self, offset: object, default: object = None) -> Expression:
+        offset_lit = lit(offset)
+        default_lit = lit(default)
+        expr = self._expr.lag(offset_lit._expr, default_lit._expr)
+        return Expression._from_pyexpr(expr)
+
+    def first(self) -> Expression:
+        expr = self._expr.first()
+        return Expression._from_pyexpr(expr)
+
+    def last(self) -> Expression:
+        expr = self._expr.last()
+        return Expression._from_pyexpr(expr)
+
+    def nth(self, n: int) -> Expression:
+        n_lit = lit(n)
+        expr = self._expr.nth(n_lit._expr)
+        return Expression._from_pyexpr(expr)
+
+    def over(self, window: Window) -> Expression:
+        expr = self._expr.over(window.window_spec)
+        return Expression._from_pyexpr(expr)
+
+
+class Window:
+    def __init__(
+        self,
+        partition_by: list[str] = [],
+        order_by: list[str] = [],
+        descending: list[Any] = [],
+        rows_between: tuple[int, int] | None = None,
+        range_between: tuple[Any, Any] | None = None,
+    ) -> None:
+        partitionBy = []
+        for c in partition_by or []:
+            if isinstance(c, str):
+                partitionBy.append(col(c)._expr)
+            elif isinstance(c, Expression):
+                partitionBy.append(c._expr)
+            else:
+                raise ValueError(f"Unsupported partition_by type: {type(c)}")
+
+        orderBy = []
+        for c in order_by or []:
+            if isinstance(c, str):
+                orderBy.append(col(c)._expr)
+            elif isinstance(c, Expression):
+                orderBy.append(c._expr)
+            else:
+                raise ValueError(f"Unsupported order_by type: {type(c)}")
+
+        desc: list[bool] = []
+        if len(descending) == 0:
+            desc = [False] * len(orderBy)
+        else:
+            for c in descending:
+                if isinstance(c, bool):
+                    desc.append(c)
+                else:
+                    raise ValueError(f"Unsupported descending type: {type(c)}")
+
+        left_bound, right_bound = None, None
+        if rows_between is not None and range_between is not None:
+            raise ValueError("Cannot specify both rows_between and range_between for a window spec")
+
+        if rows_between is not None:
+            left, right = rows_between
+            if not isinstance(left, int) or not isinstance(right, int):
+                raise ValueError("rows_between must be a tuple of integers")
+            left_bound = lit(left)._expr
+            right_bound = lit(right)._expr
+
+        if range_between is not None:
+            left, right = range_between
+            if left is None:
+                if not (
+                    isinstance(right, int)
+                    or isinstance(right, datetime)
+                    or isinstance(right, date)
+                    or isinstance(right, timedelta)
+                    or (right is None)
+                ):
+                    raise ValueError("right bound of range_between must be an int, datetime, date, or None")
+
+            if right is None:
+                if not (
+                    isinstance(left, int)
+                    or isinstance(left, datetime)
+                    or isinstance(left, date)
+                    or isinstance(left, timedelta)
+                    or (left is None)
+                ):
+                    raise ValueError("left bound of range_between must be an int, datetime, date, timedelta or None")
+
+            if not (
+                (isinstance(left, int) and isinstance(right, int))
+                or (isinstance(left, datetime) and isinstance(right, datetime))
+                or (isinstance(left, date) and isinstance(right, date))
+                or (isinstance(left, timedelta) and isinstance(right, timedelta))
+            ):
+                raise ValueError("range_between bounds must match types")
+
+            left_bound = lit(left)._expr
+            right_bound = lit(right)._expr
+
+        self.window_spec = _WindowSpec.from_user_defined_spec(
+            partition_by=partitionBy,
+            order_by=orderBy,
+            descending=desc,
+            range=(range_between is not None),
+            left_bound=left_bound,
+            right_bound=right_bound,
+        )
 
 
 SomeExpressionNamespace = TypeVar("SomeExpressionNamespace", bound="ExpressionNamespace")

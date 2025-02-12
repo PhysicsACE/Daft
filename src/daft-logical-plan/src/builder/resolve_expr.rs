@@ -9,7 +9,10 @@ use common_treenode::{Transformed, TransformedResult, TreeNode};
 use daft_core::prelude::*;
 #[cfg(feature = "python")]
 use daft_core::python::PySchema;
-use daft_dsl::{col, functions::FunctionExpr, has_agg, is_actor_pool_udf, AggExpr, Expr, ExprRef};
+use daft_dsl::{
+    col, extract_window_frame, functions::FunctionExpr, has_agg, has_over, has_window_fn,
+    is_actor_pool_udf, AggExpr, Expr, ExprRef, WindowSpecRef,
+};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 use typed_builder::TypedBuilder;
@@ -254,6 +257,18 @@ impl<'a> ExprResolver<'a> {
             )));
         }
 
+        if has_over(&expr) {
+            return Err(DaftError::ValueError(format!(
+                "Over expressions are currently only allowed in with_column(s): {expr}\nIf you would like to have this feature, please see https://github.com/Eventual-Inc/Daft/issues/1979#issue-2170913383",
+            )));
+        }
+
+        if has_window_fn(&expr) {
+            return Err(DaftError::ValueError(format!(
+                "Window functions are currently only allowed in with_column(s): {expr}\nIf you would like to have this feature, please see https://github.com/Eventual-Inc/Daft/issues/1979#issue-2170913383",
+            )));
+        }
+
         let validated_expr = if self.in_agg_context {
             self.validate_expr_in_agg(expr)
         } else {
@@ -295,6 +310,36 @@ impl<'a> ExprResolver<'a> {
                 resolved_exprs.len()
             ))),
         }
+    }
+
+    pub fn has_window_clause(&self, exprs: Vec<ExprRef>) -> bool {
+        exprs.iter().any(has_over)
+    }
+
+    pub fn resolve_windows(&self, exprs: Vec<ExprRef>) -> DaftResult<WindowSpecRef> {
+        let mut window_frames: Vec<WindowSpecRef> = Vec::new();
+        let mut frame_count = 0;
+        for expr in &exprs {
+            if has_over(expr) {
+                let frame = extract_window_frame(expr)?;
+                if window_frames.is_empty() {
+                    window_frames.push(frame);
+                } else if frame != window_frames[0] {
+                    return Err(DaftError::ValueError(format!(
+                        "Each projection layer only supports a single window frame: {expr}",
+                    )));
+                }
+                frame_count += 1;
+            }
+        }
+
+        if frame_count != exprs.len() {
+            return Err(DaftError::ValueError(
+                "Non windowed expressions are not currently supported along with windowed expressions".to_string(),
+            ));
+        }
+
+        Ok(window_frames[0].clone())
     }
 
     fn validate_expr(&self, expr: ExprRef) -> DaftResult<ExprRef> {

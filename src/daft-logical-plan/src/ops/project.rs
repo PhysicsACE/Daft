@@ -3,7 +3,10 @@ use std::sync::Arc;
 use common_error::DaftResult;
 use common_treenode::Transformed;
 use daft_core::prelude::*;
-use daft_dsl::{optimization, AggExpr, ApproxPercentileParams, Expr, ExprRef};
+use daft_dsl::{
+    optimization, AggExpr, ApproxPercentileParams, Expr, ExprRef, NavigationFn, NumberingFn,
+    WindowFn,
+};
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 
@@ -220,7 +223,7 @@ fn replace_column_with_semantic_id(
         };
         Transformed::yes(new_expr.into())
     } else {
-        match e.as_ref() {
+        match e.clone().as_ref() {
             Expr::Column(_)
             | Expr::Literal(_)
             | Expr::Subquery(_)
@@ -421,6 +424,117 @@ fn replace_column_with_semantic_id(
                     Transformed::yes(Expr::InSubquery(expr.data, subquery.clone()).into())
                 }
             }
+            Expr::Over(expr, window_spec) => {
+                replace_column_with_semantic_id(expr.clone(), subexprs_to_replace, schema)
+                    .map_yes_no(
+                        |transformed_child| {
+                            Expr::Over(transformed_child, window_spec.clone()).into()
+                        },
+                        |_| e,
+                    )
+            }
+            Expr::WindowExpression(window_fn) => replace_column_with_semantic_id_windowfn(
+                window_fn.clone(),
+                subexprs_to_replace,
+                schema,
+            )
+            .map_yes_no(
+                |transformed_child| Expr::WindowExpression(transformed_child).into(),
+                |_| e,
+            ),
+        }
+    }
+}
+
+fn replace_column_with_semantic_id_windowfn(
+    e: WindowFn,
+    subexprs_to_replace: &IndexSet<FieldID>,
+    schema: &Schema,
+) -> Transformed<WindowFn> {
+    match e {
+        WindowFn::Aggregate(ref agg_expr) => {
+            replace_column_with_semantic_id_aggexpr(agg_expr.clone(), subexprs_to_replace, schema)
+                .map_yes_no(WindowFn::Aggregate, |_| e)
+        }
+        WindowFn::Numbering(ref numbering_fn) => replace_column_with_semantic_id_numbering(
+            numbering_fn.clone(),
+            subexprs_to_replace,
+            schema,
+        )
+        .map_yes_no(WindowFn::Numbering, |_| e),
+        WindowFn::Navigation(ref navigation_fn) => replace_column_with_semantic_id_navigation(
+            navigation_fn.clone(),
+            subexprs_to_replace,
+            schema,
+        )
+        .map_yes_no(WindowFn::Navigation, |_| e),
+    }
+}
+
+fn replace_column_with_semantic_id_numbering(
+    e: NumberingFn,
+    subexprs_to_replace: &IndexSet<FieldID>,
+    schema: &Schema,
+) -> Transformed<NumberingFn> {
+    match e {
+        NumberingFn::Rank(ref child) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema)
+                .map_yes_no(NumberingFn::Rank, |_| e)
+        }
+        NumberingFn::DenseRank(ref child) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema)
+                .map_yes_no(NumberingFn::DenseRank, |_| e)
+        }
+        NumberingFn::RowNumber(ref child) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema)
+                .map_yes_no(NumberingFn::RowNumber, |_| e)
+        }
+        NumberingFn::PercentRank(ref child) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema)
+                .map_yes_no(NumberingFn::PercentRank, |_| e)
+        }
+        NumberingFn::CumeDist(ref child) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema)
+                .map_yes_no(NumberingFn::CumeDist, |_| e)
+        }
+    }
+}
+
+fn replace_column_with_semantic_id_navigation(
+    e: NavigationFn,
+    subexprs_to_replace: &IndexSet<FieldID>,
+    schema: &Schema,
+) -> Transformed<NavigationFn> {
+    match e {
+        NavigationFn::First(ref child) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema)
+                .map_yes_no(NavigationFn::First, |_| e)
+        }
+        NavigationFn::Last(ref child) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema)
+                .map_yes_no(NavigationFn::Last, |_| e)
+        }
+        NavigationFn::Nth(ref child, ref n) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema).map_yes_no(
+                |transformed_child| NavigationFn::Nth(transformed_child, n.clone()),
+                |_| e.clone(),
+            )
+        }
+        NavigationFn::Lead(ref child, ref offset, ref default) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema).map_yes_no(
+                |transformed_child| {
+                    NavigationFn::Lead(transformed_child, offset.clone(), default.clone())
+                },
+                |_| e.clone(),
+            )
+        }
+        NavigationFn::Lag(ref child, ref offset, ref default) => {
+            replace_column_with_semantic_id(child.clone(), subexprs_to_replace, schema).map_yes_no(
+                |transformed_child| {
+                    NavigationFn::Lag(transformed_child, offset.clone(), default.clone())
+                },
+                |_| e.clone(),
+            )
         }
     }
 }

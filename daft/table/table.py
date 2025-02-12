@@ -15,6 +15,7 @@ from daft.daft import (
 )
 from daft.daft import PyTable as _PyTable
 from daft.daft import ScanTask as _ScanTask
+from daft.daft import WindowSpec as _WindowSpec
 from daft.daft import read_csv as _read_csv
 from daft.daft import read_json as _read_json
 from daft.daft import read_parquet as _read_parquet
@@ -301,6 +302,12 @@ class Table:
     ) -> Table:
         group_by_pyexprs = [e._expr for e in group_by]
         return Table._from_pytable(self._table.pivot(group_by_pyexprs, pivot_column._expr, values_column._expr, names))
+
+    def partitioned_window(
+        self, window_spec: _WindowSpec, window_fns: list[Expression], window_names: list[str]
+    ) -> Table:
+        window_fns_pyexprs = [e._expr for e in window_fns]
+        return Table._from_pytable(self._table.partitioned_window(window_spec, window_fns_pyexprs, window_names))
 
     def quantiles(self, num: int) -> Table:
         return Table._from_pytable(self._table.quantiles(num))

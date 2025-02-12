@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from pyiceberg.schema import Schema as IcebergSchema
     from pyiceberg.table import TableProperties as IcebergTableProperties
 
-    from daft.daft import FileFormat, IOConfig, JoinType, ScanTask
+    from daft.daft import FileFormat, IOConfig, JoinType, ScanTask, WindowSpec
     from daft.logical.map_partition_ops import MapPartitionOp
     from daft.logical.schema import Schema
 
@@ -1173,4 +1173,25 @@ class FanoutEvenSlices(FanoutInstruction):
                 size_bytes=None,
             )
             for _ in range(self._num_outputs)
+        ]
+
+
+@dataclass(frozen=True)
+class PartitionedWindow(SingleOutputInstruction):
+    window_spec: WindowSpec
+    window_fns: list[Expression]
+    window_names: list[str]
+
+    def run(self, inputs: list[MicroPartition]) -> list[MicroPartition]:
+        [input] = inputs
+        return [input.partitioned_window(self.window_spec, self.window_fns, self.window_names)]
+
+    def run_partial_metadata(self, input_metadatas: list[PartialPartitionMetadata]) -> list[PartialPartitionMetadata]:
+        [input_meta] = input_metadatas
+        num_rows = input_meta.num_rows
+        return [
+            PartialPartitionMetadata(
+                num_rows=num_rows,
+                size_bytes=None,
+            )
         ]

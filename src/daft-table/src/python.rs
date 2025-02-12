@@ -4,7 +4,7 @@ use daft_core::{
     prelude::*,
     python::{series::PySeries, PySchema},
 };
-use daft_dsl::python::PyExpr;
+use daft_dsl::python::{PyExpr, PyWindowSpec};
 use daft_logical_plan::FileInfos;
 use indexmap::IndexMap;
 use pyo3::{exceptions::PyValueError, prelude::*};
@@ -128,6 +128,29 @@ impl PyTable {
                     converted_pivot_col,
                     converted_values_col,
                     names,
+                )?
+                .into())
+        })
+    }
+
+    pub fn partitioned_window(
+        &self,
+        py: Python,
+        window_spec: PyWindowSpec,
+        window_fns: Vec<PyExpr>,
+        window_names: Vec<String>,
+    ) -> PyResult<Self> {
+        let converted_window_fns: Vec<daft_dsl::ExprRef> = window_fns
+            .into_iter()
+            .map(std::convert::Into::into)
+            .collect();
+        py.allow_threads(|| {
+            Ok(self
+                .table
+                .partitioned_window(
+                    window_spec.into(),
+                    converted_window_fns.as_slice(),
+                    window_names,
                 )?
                 .into())
         })

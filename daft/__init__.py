@@ -72,7 +72,7 @@ from daft.daft import ImageFormat, ImageMode, ResourceRequest
 from daft.dataframe import DataFrame
 from daft.logical.schema import Schema
 from daft.datatype import DataType, TimeUnit
-from daft.expressions import Expression, col, list_, lit, interval, coalesce
+from daft.expressions import Expression, col, list_, lit, interval, coalesce, Window
 from daft.io import (
     DataCatalogTable,
     DataCatalogType,
@@ -105,6 +105,7 @@ __all__ = [
     "Schema",
     "Series",
     "TimeUnit",
+    "Window",
     "coalesce",
     "col",
     "execution_config_ctx",

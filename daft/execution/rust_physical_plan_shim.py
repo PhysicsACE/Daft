@@ -11,6 +11,7 @@ from daft.daft import (
     PySchema,
     ResourceRequest,
     ScanTask,
+    WindowSpec,
 )
 from daft.execution import execution_step, physical_plan
 from daft.expressions import Expression, ExpressionsProjection
@@ -393,3 +394,23 @@ def write_lance(
     kwargs: dict | None,
 ) -> physical_plan.InProgressPhysicalPlan[PartitionT]:
     return physical_plan.lance_write(input, path, mode, io_config, kwargs)
+
+
+def partitioned_window(
+    input: physical_plan.InProgressPhysicalPlan[PartitionT],
+    window_spec: WindowSpec,
+    window_fns: list[PyExpr],
+    window_names: list[str],
+) -> physical_plan.InProgressPhysicalPlan[PartitionT]:
+    print("partitioned window")
+    window_step = execution_step.PartitionedWindow(
+        window_spec=window_spec,
+        window_fns=[Expression._from_pyexpr(expr) for expr in window_fns],
+        window_names=window_names,
+    )
+
+    return physical_plan.pipeline_instruction(
+        child_plan=input,
+        pipeable_instruction=window_step,
+        resource_request=ResourceRequest(),
+    )

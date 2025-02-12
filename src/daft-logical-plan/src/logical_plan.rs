@@ -37,6 +37,7 @@ pub enum LogicalPlan {
     Sink(Sink),
     Sample(Sample),
     MonotonicallyIncreasingId(MonotonicallyIncreasingId),
+    Window(Window),
 }
 
 pub type LogicalPlanRef = Arc<LogicalPlan>;
@@ -75,6 +76,7 @@ impl LogicalPlan {
             Self::MonotonicallyIncreasingId(MonotonicallyIncreasingId { schema, .. }) => {
                 schema.clone()
             }
+            Self::Window(Window { output_schema, .. }) => output_schema.clone(),
         }
     }
 
@@ -177,6 +179,29 @@ impl LogicalPlan {
             Self::Union(_) => vec![IndexSet::new(), IndexSet::new()],
             Self::Source(_) => todo!(),
             Self::Sink(_) => todo!(),
+            Self::Window(window) => {
+                let res = window
+                    .window_fns
+                    .iter()
+                    .flat_map(|agg| agg.children())
+                    .flat_map(|e| get_required_columns(&e))
+                    .chain(
+                        window
+                            .window_spec
+                            .partition_by
+                            .iter()
+                            .flat_map(get_required_columns),
+                    )
+                    .chain(
+                        window
+                            .window_spec
+                            .order_by
+                            .iter()
+                            .flat_map(get_required_columns),
+                    )
+                    .collect();
+                vec![res]
+            }
         }
     }
 
@@ -201,6 +226,7 @@ impl LogicalPlan {
             Self::Sink(..) => "Sink",
             Self::Sample(..) => "Sample",
             Self::MonotonicallyIncreasingId(..) => "MonotonicallyIncreasingId",
+            Self::Window(..) => "Window",
         }
     }
 
@@ -222,9 +248,8 @@ impl LogicalPlan {
             | Self::Join(Join { stats_state, .. })
             | Self::Sink(Sink { stats_state, .. })
             | Self::Sample(Sample { stats_state, .. })
-            | Self::MonotonicallyIncreasingId(MonotonicallyIncreasingId { stats_state, .. }) => {
-                stats_state
-            }
+            | Self::MonotonicallyIncreasingId(MonotonicallyIncreasingId { stats_state, .. })
+            | Self::Window(Window { stats_state, .. }) => stats_state,
             Self::Intersect(_) => {
                 panic!("Intersect nodes should be optimized away before stats are materialized")
             }
@@ -267,6 +292,7 @@ impl LogicalPlan {
             Self::MonotonicallyIncreasingId(plan) => {
                 Self::MonotonicallyIncreasingId(plan.with_materialized_stats())
             }
+            Self::Window(plan) => Self::Window(plan.with_materialized_stats()),
         }
     }
 
@@ -293,6 +319,7 @@ impl LogicalPlan {
             Self::MonotonicallyIncreasingId(monotonically_increasing_id) => {
                 monotonically_increasing_id.multiline_display()
             }
+            Self::Window(window) => window.multiline_display(),
         }
     }
 
@@ -319,6 +346,7 @@ impl LogicalPlan {
             Self::MonotonicallyIncreasingId(MonotonicallyIncreasingId { input, .. }) => {
                 vec![input]
             }
+            Self::Window(Window { input, .. }) => vec![input],
         }
     }
 
@@ -343,6 +371,7 @@ impl LogicalPlan {
                 Self::Unpivot(Unpivot {ids, values, variable_name, value_name, output_schema, ..}) =>
                     Self::Unpivot(Unpivot::new(input.clone(), ids.clone(), values.clone(), variable_name.clone(), value_name.clone(), output_schema.clone())),
                 Self::Sample(Sample {fraction, with_replacement, seed, ..}) => Self::Sample(Sample::new(input.clone(), *fraction, *with_replacement, *seed)),
+                Self::Window(Window { window_spec, window_fns, window_names, .. }) => Self::Window(Window::try_new(input.clone(), window_spec.clone(), window_fns.clone(), window_names.clone()).unwrap()),
                 Self::Concat(_) => panic!("Concat ops should never have only one input, but got one"),
                 Self::Intersect(_) => panic!("Intersect ops should never have only one input, but got one"),
                 Self::Union(_) => panic!("Union ops should never have only one input, but got one"),
@@ -496,3 +525,4 @@ impl_from_data_struct_for_logical_plan!(Join);
 impl_from_data_struct_for_logical_plan!(Sink);
 impl_from_data_struct_for_logical_plan!(Sample);
 impl_from_data_struct_for_logical_plan!(MonotonicallyIncreasingId);
+impl_from_data_struct_for_logical_plan!(Window);

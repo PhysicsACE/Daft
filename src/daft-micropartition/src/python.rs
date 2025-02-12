@@ -8,7 +8,7 @@ use daft_core::{
     python::{PySchema, PySeries, PyTimeUnit},
 };
 use daft_csv::{CsvConvertOptions, CsvParseOptions, CsvReadOptions};
-use daft_dsl::python::PyExpr;
+use daft_dsl::python::{PyExpr, PyWindowSpec};
 use daft_io::{python::IOConfig, IOStatsContext};
 use daft_json::{JsonConvertOptions, JsonParseOptions, JsonReadOptions};
 use daft_parquet::read::ParquetSchemaInferenceOptions;
@@ -261,6 +261,30 @@ impl PyMicroPartition {
                     converted_pivot_col,
                     converted_values_col,
                     names,
+                )?
+                .into())
+        })
+    }
+
+    pub fn partitioned_window(
+        &self,
+        py: Python,
+        window_spec: PyWindowSpec,
+        window_fns: Vec<PyExpr>,
+        window_names: Vec<String>,
+    ) -> PyResult<Self> {
+        let converted_window_fns: Vec<daft_dsl::ExprRef> = window_fns
+            .into_iter()
+            .map(std::convert::Into::into)
+            .collect();
+
+        py.allow_threads(|| {
+            Ok(self
+                .inner
+                .partitioned_window(
+                    window_spec.into(),
+                    converted_window_fns.as_slice(),
+                    window_names,
                 )?
                 .into())
         })

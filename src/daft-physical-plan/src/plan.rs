@@ -45,6 +45,7 @@ pub enum PhysicalPlan {
     DeltaLakeWrite(DeltaLakeWrite),
     #[cfg(feature = "python")]
     LanceWrite(LanceWrite),
+    PartitionedWindow(PartitionedWindow),
 }
 
 impl PhysicalPlan {
@@ -180,6 +181,25 @@ impl PhysicalPlan {
             #[cfg(feature = "python")]
             Self::IcebergWrite(_) | Self::DeltaLakeWrite(_) | Self::LanceWrite(_) => {
                 ClusteringSpec::Unknown(UnknownClusteringConfig::new(1)).into()
+            }
+            Self::PartitionedWindow(PartitionedWindow {
+                input, window_spec, ..
+            }) => {
+                let input_clustering_spec = input.clustering_spec();
+                if input_clustering_spec.num_partitions() == 1 {
+                    input_clustering_spec
+                } else if window_spec.partition_by.is_empty() {
+                    ClusteringSpec::Unknown(UnknownClusteringConfig::new(
+                        input_clustering_spec.num_partitions(),
+                    ))
+                    .into()
+                } else {
+                    ClusteringSpec::Hash(HashClusteringConfig::new(
+                        input_clustering_spec.num_partitions(),
+                        window_spec.partition_by.clone(),
+                    ))
+                    .into()
+                }
             }
         }
     }
@@ -359,6 +379,7 @@ impl PhysicalPlan {
             Self::IcebergWrite(_) | Self::DeltaLakeWrite(_) | Self::LanceWrite(_) => {
                 ApproxStats::empty()
             }
+            Self::PartitionedWindow(PartitionedWindow { input, .. }) => input.approximate_stats(),
         }
     }
 
@@ -400,6 +421,7 @@ impl PhysicalPlan {
             Self::MonotonicallyIncreasingId(MonotonicallyIncreasingId { input, .. }) => {
                 vec![input]
             }
+            Self::PartitionedWindow(PartitionedWindow { input, .. }) => vec![input],
         }
     }
 
@@ -435,6 +457,7 @@ impl PhysicalPlan {
                 #[cfg(feature = "python")]
                 Self::LanceWrite(LanceWrite { schema, lance_info, .. }) => Self::LanceWrite(LanceWrite::new(schema.clone(), lance_info.clone(), input.clone())),
                 Self::Concat(_) | Self::HashJoin(_) | Self::SortMergeJoin(_) | Self::BroadcastJoin(_) | Self::CrossJoin(_) => panic!("{} requires more than 1 input, but received: {}", self, children.len()),
+                Self::PartitionedWindow(PartitionedWindow { window_spec, window_fns, window_names, .. }) => Self::PartitionedWindow(PartitionedWindow::new(input.clone(), window_spec.clone(), window_fns.clone(), window_names.clone())),
             },
             [input1, input2] => match self {
                 #[cfg(feature = "python")]
@@ -490,6 +513,7 @@ impl PhysicalPlan {
             Self::DeltaLakeWrite(..) => "DeltaLakeWrite",
             #[cfg(feature = "python")]
             Self::LanceWrite(..) => "LanceWrite",
+            Self::PartitionedWindow(..) => "PartitionedWindow",
         };
         name.to_string()
     }
@@ -529,6 +553,7 @@ impl PhysicalPlan {
             Self::DeltaLakeWrite(delta_lake_info) => delta_lake_info.multiline_display(),
             #[cfg(feature = "python")]
             Self::LanceWrite(lance_info) => lance_info.multiline_display(),
+            Self::PartitionedWindow(partitioned_window) => partitioned_window.multiline_display(),
         }
     }
 

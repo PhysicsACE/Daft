@@ -14,8 +14,8 @@ use daft_physical_plan::{
     logical_to_physical,
     ops::{
         ActorPoolProject, Aggregate, BroadcastJoin, Concat, EmptyScan, Explode, Filter, HashJoin,
-        InMemoryScan, Limit, MonotonicallyIncreasingId, Pivot, Project, Sample, Sort,
-        SortMergeJoin, TabularScan, TabularWriteCsv, TabularWriteJson, TabularWriteParquet,
+        InMemoryScan, Limit, MonotonicallyIncreasingId, PartitionedWindow, Pivot, Project, Sample,
+        Sort, SortMergeJoin, TabularScan, TabularWriteCsv, TabularWriteJson, TabularWriteParquet,
         Unpivot,
     },
     PhysicalPlan, PhysicalPlanRef, QueryStageOutput,
@@ -28,6 +28,7 @@ use {
     daft_core::prelude::SchemaRef,
     daft_core::python::PySchema,
     daft_dsl::python::PyExpr,
+    daft_dsl::python::PyWindowSpec,
     daft_logical_plan::{OutputFileInfo, PyLogicalPlanBuilder},
     daft_scan::python::pylib::PyScanTask,
     pyo3::{
@@ -893,5 +894,34 @@ fn physical_plan_to_partition_tasks(
             physical_plan_to_partition_tasks(input, py, psets, actor_pool_manager)?,
             lance_info,
         ),
+        PhysicalPlan::PartitionedWindow(PartitionedWindow {
+            input,
+            window_spec,
+            window_fns,
+            window_names,
+        }) => {
+            println!("scheduling");
+            let upstream_iter =
+                physical_plan_to_partition_tasks(input, py, psets, actor_pool_manager)?;
+            let window_fns_pyexprs: Vec<PyExpr> = window_fns
+                .iter()
+                .map(|expr| PyExpr::from(expr.clone()))
+                .collect();
+
+            let py_window_spec = PyWindowSpec(window_spec.clone());
+            let derefed_window_names: Vec<&str> =
+                window_names.iter().map(|name| name.as_str()).collect();
+
+            let py_iter = py
+                .import(pyo3::intern!(py, "daft.execution.rust_physical_plan_shim"))?
+                .getattr(pyo3::intern!(py, "partitioned_window"))?
+                .call1((
+                    upstream_iter,
+                    py_window_spec,
+                    window_fns_pyexprs,
+                    derefed_window_names,
+                ))?;
+            Ok(py_iter.into())
+        }
     }
 }

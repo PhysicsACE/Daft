@@ -183,6 +183,19 @@ pub trait DaftSumAggable {
     type Output;
     fn sum(&self) -> Self::Output;
     fn grouped_sum(&self, groups: &GroupIndices) -> Self::Output;
+    fn grouped_cum_sum(&self, groups: &GroupIndices) -> Self::Output;
+    fn grouped_row_sum(
+        &self,
+        groups: &GroupIndices,
+        left_row: Option<u64>,
+        right_row: Option<u64>,
+    ) -> Self::Output;
+    fn grouped_range_sum(
+        &self,
+        groups: &GroupIndices,
+        left_ranges: &[Vec<u64>],
+        right_ranges: &[Vec<u64>],
+    ) -> Self::Output;
 }
 
 pub trait DaftApproxSketchAggable {

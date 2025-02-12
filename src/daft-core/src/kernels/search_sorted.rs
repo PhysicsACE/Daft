@@ -12,6 +12,82 @@ use arrow2::{
 use num_traits::Float;
 
 #[allow(clippy::eq_op)]
+fn search_sorted_primitive_array_left<T: NativeType + PartialOrd>(
+    sorted_array: &PrimitiveArray<T>,
+    keys: &PrimitiveArray<T>,
+    input_reversed: bool,
+) -> PrimitiveArray<u64> {
+    let array_size = sorted_array.len();
+
+    let mut left = 0_usize;
+    let mut right = array_size;
+
+    let mut results: Vec<u64> = Vec::with_capacity(array_size);
+    let mut last_key = keys.iter().next().unwrap_or(None);
+    let less = |l: &T, r: &T| l < r || (r != r && l == l);
+    let eq = |l: &T, r: &T| l == r || (r != r && l == l);
+    for key_val in keys {
+        let is_last_key_lt = match (last_key, key_val) {
+            (None, None) => false,
+            (None, Some(_)) => input_reversed,
+            (Some(last_key), Some(key_val)) => {
+                if !input_reversed {
+                    less(last_key, key_val)
+                } else {
+                    less(key_val, last_key)
+                }
+            }
+            (Some(_), None) => !input_reversed,
+        };
+
+        if is_last_key_lt {
+            right = array_size;
+        } else {
+            left = 0;
+            right = if right < array_size {
+                right + 1
+            } else {
+                array_size
+            };
+        }
+
+        while left < right {
+            let mid_idx = left + ((right - left) >> 1);
+            let mid_val = unsafe { sorted_array.value_unchecked(mid_idx) };
+            let is_key_val_leq = match (key_val, sorted_array.is_valid(mid_idx)) {
+                (None, false) => false,
+                (None, true) => input_reversed,
+                (Some(key_val), true) => {
+                    if !input_reversed {
+                        println!("key val {} <= {}", key_val, mid_val);
+                        if eq(key_val, &mid_val) {
+                            true
+                        } else {
+                            less(key_val, &mid_val)
+                        }
+                    } else if eq(&mid_val, key_val) {
+                        true
+                    } else {
+                        less(&mid_val, key_val)
+                    }
+                }
+                (Some(_), false) => !input_reversed,
+            };
+
+            if is_key_val_leq {
+                right = mid_idx;
+            } else {
+                left = mid_idx + 1;
+            }
+        }
+        results.push(left.try_into().unwrap());
+        last_key = key_val;
+    }
+
+    PrimitiveArray::<u64>::new(DataType::UInt64, results.into(), None)
+}
+
+#[allow(clippy::eq_op)]
 fn search_sorted_primitive_array<T: NativeType + PartialOrd>(
     sorted_array: &PrimitiveArray<T>,
     keys: &PrimitiveArray<T>,
@@ -570,6 +646,7 @@ pub fn search_sorted(
     sorted_array: &dyn Array,
     keys: &dyn Array,
     input_reversed: bool,
+    left: bool,
 ) -> Result<PrimitiveArray<u64>> {
     if sorted_array.data_type() != keys.data_type() {
         let error_string = format!(
@@ -582,40 +659,90 @@ pub fn search_sorted(
     Ok(match sorted_array.data_type().to_physical_type() {
         // Boolean => hash_boolean(array.as_any().downcast_ref().unwrap()),
         PhysicalType::Primitive(primitive) => {
-            with_match_searching_primitive_type!(primitive, |$T| {
-                search_sorted_primitive_array::<$T>(sorted_array.as_any().downcast_ref().unwrap(), keys.as_any().downcast_ref().unwrap(), input_reversed)
-            })
+            if left {
+                with_match_searching_primitive_type!(primitive, |$T| {
+                    search_sorted_primitive_array_left::<$T>(sorted_array.as_any().downcast_ref().unwrap(), keys.as_any().downcast_ref().unwrap(), input_reversed)
+                })
+            } else {
+                with_match_searching_primitive_type!(primitive, |$T| {
+                    search_sorted_primitive_array::<$T>(sorted_array.as_any().downcast_ref().unwrap(), keys.as_any().downcast_ref().unwrap(), input_reversed)
+                })
+            }
         }
-        PhysicalType::Utf8 => search_sorted_utf_array::<i32>(
-            sorted_array.as_any().downcast_ref().unwrap(),
-            keys.as_any().downcast_ref().unwrap(),
-            input_reversed,
-        ),
-        PhysicalType::LargeUtf8 => search_sorted_utf_array::<i64>(
-            sorted_array.as_any().downcast_ref().unwrap(),
-            keys.as_any().downcast_ref().unwrap(),
-            input_reversed,
-        ),
-        PhysicalType::Binary => search_sorted_binary_array::<i32>(
-            sorted_array.as_any().downcast_ref().unwrap(),
-            keys.as_any().downcast_ref().unwrap(),
-            input_reversed,
-        ),
-        PhysicalType::LargeBinary => search_sorted_binary_array::<i64>(
-            sorted_array.as_any().downcast_ref().unwrap(),
-            keys.as_any().downcast_ref().unwrap(),
-            input_reversed,
-        ),
-        PhysicalType::FixedSizeBinary => search_sorted_fixed_size_binary_array(
-            sorted_array.as_any().downcast_ref().unwrap(),
-            keys.as_any().downcast_ref().unwrap(),
-            input_reversed,
-        ),
-        PhysicalType::Boolean => search_sorted_boolean_array(
-            sorted_array.as_any().downcast_ref().unwrap(),
-            keys.as_any().downcast_ref().unwrap(),
-            input_reversed,
-        ),
+        PhysicalType::Utf8 => {
+            if left {
+                return Err(Error::NotYetImplemented(
+                    "search_sorted not implemented for type Utf8".to_string(),
+                ));
+            }
+
+            search_sorted_utf_array::<i32>(
+                sorted_array.as_any().downcast_ref().unwrap(),
+                keys.as_any().downcast_ref().unwrap(),
+                input_reversed,
+            )
+        }
+        PhysicalType::LargeUtf8 => {
+            if left {
+                return Err(Error::NotYetImplemented(
+                    "search_sorted not implemented for type LargeUtf8".to_string(),
+                ));
+            }
+            search_sorted_utf_array::<i64>(
+                sorted_array.as_any().downcast_ref().unwrap(),
+                keys.as_any().downcast_ref().unwrap(),
+                input_reversed,
+            )
+        }
+        PhysicalType::Binary => {
+            if left {
+                return Err(Error::NotYetImplemented(
+                    "search_sorted not implemented for type Binary".to_string(),
+                ));
+            }
+            search_sorted_binary_array::<i32>(
+                sorted_array.as_any().downcast_ref().unwrap(),
+                keys.as_any().downcast_ref().unwrap(),
+                input_reversed,
+            )
+        }
+        PhysicalType::LargeBinary => {
+            if left {
+                return Err(Error::NotYetImplemented(
+                    "search_sorted not implemented for type LargeBinary".to_string(),
+                ));
+            }
+
+            search_sorted_binary_array::<i64>(
+                sorted_array.as_any().downcast_ref().unwrap(),
+                keys.as_any().downcast_ref().unwrap(),
+                input_reversed,
+            )
+        }
+        PhysicalType::FixedSizeBinary => {
+            if left {
+                return Err(Error::NotYetImplemented(
+                    "search_sorted not implemented for type FixedSizeBinary".to_string(),
+                ));
+            }
+            search_sorted_fixed_size_binary_array(
+                sorted_array.as_any().downcast_ref().unwrap(),
+                keys.as_any().downcast_ref().unwrap(),
+                input_reversed,
+            )
+        }
+        PhysicalType::Boolean => {
+            if left {
+                return Err(Error::NotYetImplemented(
+                    "search_sorted not implemented for type Boolean".to_string(),
+                ));
+            }
+            search_sorted_boolean_array(
+                sorted_array.as_any().downcast_ref().unwrap(),
+                keys.as_any().downcast_ref().unwrap(),
+                input_reversed,
+            )
+        }
         t => {
             return Err(Error::NotYetImplemented(format!(
                 "search_sorted not implemented for type {t:?}"
